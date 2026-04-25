@@ -9,6 +9,13 @@
   <img src="https://img.shields.io/badge/Qt-6.11.0+-blue?style=flat&logo=qt&logoColor=gree" alt="Qt 6.11.0+">
 </p>
 
+## 简介
+自 $2024$ 年 $5$ 月起，历经 20 多个月的开发，我们终于能将 Compiler IDE，呈现给大家！
+
+这不止是一个 IDE 的诞生，更是属于每一位 OIer 的新故事，即将从这里开始书写。未来已来，共同启程！
+
+本 IDE 由 CompilerIDE Team 团队共同开发，支持的编程语言只有 C++。目前最新版本为 3.5.2。操作系统应为 Windows（不支持 Win7 及更低版本）。
+
 ## IDE 下载
 
 你可以在[ CompilerIDE 官网](https://compileride.github.io)下载最新版本
@@ -33,4 +40,4 @@
 
 ## 开源协议
 
- 本 IDE 基于 [`GPL-v3.0`](LICENSE) 开源
+ 本 IDE 基于 [`GPL-3.0`](LICENSE) 开源
