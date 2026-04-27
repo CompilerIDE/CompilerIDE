@@ -41,3 +41,29 @@
 ## 开源协议
 
  本 IDE 基于 [`GPL-3.0`](LICENSE) 开源
+
+ ## 项目目录
+
+ ```plain
+src/
+├── main.cpp
+├── CompilerIDE.pro
+├── resources.qrc
+├── icons/
+│   ├── CompilerIDE_logo.png
+│   ├── CompilerIDE_setup.ico
+│   ├── tester_light.svg
+│   ├── tester_dark.svg
+│   ├── luogu_light.svg
+│   ├── luogu_dark.svg
+│   ├── project_manager_light.svg
+│   ├── project_manager_dark.svg
+│   ├── ai_light.svg
+│   ├── ai_dark.svg
+│   ├── code_snippet_light.svg
+│   ├── code_snippet_dark.svg
+│   ├── comparator_light.svg
+│   ├── comparator_dark.svg
+│   ├── diagnostic_light.svg
+│   └── diagnostic_dark.svg
+```
