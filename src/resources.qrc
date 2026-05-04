@@ -1,0 +1,19 @@
+<RCC>
+    <qresource prefix="/">
+        <file>icons/CompilerIDE_logo.png</file>
+        <file>icons/project_manager_dark.svg</file>
+        <file>icons/project_manager_light.svg</file>
+        <file>icons/diagnostic_dark.svg</file>
+        <file>icons/diagnostic_light.svg</file>
+        <file>icons/code_snippet_dark.svg</file>
+        <file>icons/code_snippet_light.svg</file>
+        <file>icons/comparator_dark.svg</file>
+        <file>icons/comparator_light.svg</file>
+        <file>icons/ai_dark.svg</file>
+        <file>icons/ai_light.svg</file>
+        <file>icons/luogu_dark.svg</file>
+        <file>icons/luogu_light.svg</file>
+        <file>icons/tester_dark.svg</file>
+        <file>icons/tester_light.svg</file>
+    </qresource>
+</RCC>
