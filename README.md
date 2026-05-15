@@ -14,7 +14,7 @@
 
 这不止是一个 IDE 的诞生，更是属于每一位 OIer 的新故事，即将从这里开始书写。未来已来，共同启程！
 
-本 IDE 由 CompilerIDE Team 团队共同开发，支持的编程语言只有 C++。目前最新版本为 3.5.2。操作系统应为 Windows（不支持 Win7 及更低版本）。
+本 IDE 由 CompilerIDE Team 团队共同开发，支持的编程语言只有 C++。目前最新版本为 3.5.2。操作系统应为 Windows + 64 位（不支持 Win7 及更低版本）。
 
 ## IDE 下载
 
@@ -40,7 +40,11 @@
 
 ## 开源协议
 
- 本 IDE 基于 [`GPL-3.0`](LICENSE) 开源
+本 IDE 基于 [`GPL-3.0`](LICENSE) 开源
+
+## 鸣谢
+1. 开发者名单：[Eric](Welcome - Luogu Spilopelia)、[Hrb](Welcome - Luogu Spilopelia)、[FlyHappily]([Welcome - Luogu Spilopelia](Welcome - Luogu Spilopelia))、[Lxy](https://www.luogu.com.cn/user/1616973)
+2. 感谢 [zhangchenyi_awa](https://www.luogu.com.cn/user/1271781)、[chenyajun1324](https://www.luogu.com.cn/user/1809877)、[_firestar_](https://www.luogu.com.cn/user/1972540)、[AngryFlower](https://www.luogu.com.cn/user/1631802) 等人对 CompilerIDE 的 Bug 修复做出的卓越贡献
 
  ## 项目目录
 
