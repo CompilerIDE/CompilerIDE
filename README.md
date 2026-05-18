@@ -43,7 +43,7 @@
 本 IDE 基于 [`GPL-3.0`](LICENSE) 开源
 
 ## 鸣谢
-1. 开发者名单：[Eric](Welcome - Luogu Spilopelia)、[Hrb](Welcome - Luogu Spilopelia)、[FlyHappily]([Welcome - Luogu Spilopelia](Welcome - Luogu Spilopelia))、[Lxy](https://www.luogu.com.cn/user/1616973)
+1. 开发者名单：[Eric](https://www.luogu.com.cn/user/995571)、[Hrb](https://www.luogu.com.cn/user/1286421)、[FlyHappily](https://www.luogu.com.cn/user/1364658)、[Lxy](https://www.luogu.com.cn/user/1616973)
 2. 感谢 [zhangchenyi_awa](https://www.luogu.com.cn/user/1271781)、[chenyajun1324](https://www.luogu.com.cn/user/1809877)、[_firestar_](https://www.luogu.com.cn/user/1972540)、[AngryFlower](https://www.luogu.com.cn/user/1631802) 等人对 CompilerIDE 的 Bug 修复做出的卓越贡献
 
  ## 项目目录
