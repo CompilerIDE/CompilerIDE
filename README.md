@@ -18,7 +18,7 @@
 
 ## IDE 下载
 
-你可以在 [CompilerIDE 官网](https://compileride.github.io)下载最新版本
+你可以在 [CompilerIDE 官网](https://compileride.cn)下载最新版本
 
 ## 拥有的功能
 
