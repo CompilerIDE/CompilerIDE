@@ -1,6 +1,26 @@
 <RCC>
     <qresource prefix="/">
         <file>icons/CompilerIDE_logo.png</file>
+    	<file>icons/phosphor-logo_use_in_light_mode.svg</file>
+    	<file>icons/phosphor-logo_use_in_dark_mode.svg</file>
+    	<file>icons/xterm.png</file>
+
+        <file>icons/accepted.png</file>
+        <file>icons/redo.png</file>
+        <file>icons/undo.png</file>
+
+        <file>icons/keywords_Use_in_dark_Theme.svg</file>
+        <file>icons/function_code_Use_in_dark_Theme.svg</file>
+        <file>icons/Widget_Use_in_dark_Theme.svg</file>
+        <file>icons/customize_Use_in_Dark_Theme.svg</file>
+        <file>icons/const_Use_in_dark_Theme.svg</file>
+
+        <file>icons/keywords_Use_in_Light_Theme.svg</file>
+        <file>icons/function_code_Use_in_Light_Theme.svg</file>
+        <file>icons/Widget_Use_in_Light_Theme.svg</file>
+        <file>icons/customize_Use_in_Light_Theme.svg</file>
+        <file>icons/const_Use_in_Light_Theme.svg</file>
+
         <file>icons/project_manager_dark.svg</file>
         <file>icons/project_manager_light.svg</file>
         <file>icons/diagnostic_dark.svg</file>
@@ -15,5 +35,32 @@
         <file>icons/luogu_light.svg</file>
         <file>icons/tester_dark.svg</file>
         <file>icons/tester_light.svg</file>
+
+    	<file>icons/add_test_Use_in_light_mode.svg</file>
+        <file>icons/add_test_Use_in_dark_mode.svg</file>
+        <file>icons/delete_testcase_Use_in_both_light_and_dark_mode.svg</file>
+        <file>icons/play_one_Use_in_light_mode.svg</file>
+        <file>icons/play_one_Use_in_dark_mode.svg</file>
+    	<file>icons/play-circle_use_in_dark_mode.svg</file>
+    	<file>icons/play-circle_use_in_light_mode.svg</file>
+    	<file>icons/plus-circle_use_in_dark_mode.svg</file>
+    	<file>icons/plus-circle_use_in_light_mode.svg</file>
+    	<file>icons/trash_use_in_dark_mode.svg</file>
+    	<file>icons/trash_use_in_light_mode.svg</file>
+    	<file>icons/zhe_die_use_in_dark_mode.svg</file>
+    	<file>icons/zhe_die_use_in_light_mode.svg</file>
+    	<file>icons/zhan_kai_use_in_dark_mode.svg</file>
+    	<file>icons/zhan_kai_use_in_light_mode.svg</file>
+
+    	<file>icons/circle-notch_Use_in_dark_mode.svg</file>
+    	<file>icons/circle-notch_Use_in_light_mode.svg</file>
+    	<file>icons/compile_pass.svg</file>
+    	<file>icons/compile_error.svg</file>
+    	
+    	<file>web/xterm.js</file>
+        <file>web/xterm.css</file>
+        <file>web/addon-fit.js</file>
+        <file>web/addon-web-links.js</file>
+        <file>web/addon-unicode11.js</file>
     </qresource>
 </RCC>
