@@ -1,6 +1,6 @@
 <h1 align="center">Compiler IDE</h1>
 <p align="center">
-  <a href="https://github.com/CompilerIDE/CompilerIDE/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Eric-T800/CompilerIDE.svg?style=for-the-badge&new=1" alt="License"></a>
+  <a href="https://github.com/CompilerIDE/CompilerIDE/blob/main/LICENSE"><img src="https://img.shields.io/github/license/CompilerIDE/CompilerIDE.svg?style=for-the-badge&new=1" alt="License"></a>
   <br>
 </p>
 <p align="center">
