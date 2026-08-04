@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>xterm.js 终端</title>
+    <link href="qrc:///web/xterm.css" rel="stylesheet">
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #1e1e1e;
+        }
+        #terminal-container {
+            height: 100%;
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+<div id="terminal-container"></div>
+
+<script src="qrc:///web/xterm.js"></script>
+<script src="qrc:///web/addon-fit.js"></script>
+<script src="qrc:///web/addon-web-links.js"></script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+
+<script>
+    (function() {
+        // 创建终端实例
+        const terminal = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            fontFamily: 'Consolas, "Courier New", monospace',
+            theme: {
+                background: '#1e1e1e',
+                foreground: '#d4d4d4',
+                cursor: '#ffffff'
+            },
+            scrollback: 10000,
+            allowProposedApi: false
+        });
+
+        // 加载插件
+        const fitAddon = new FitAddon();
+        terminal.loadAddon(fitAddon);
+        const webLinksAddon = new WebLinksAddon();
+        terminal.loadAddon(webLinksAddon);
+
+        // 挂载到 DOM
+        terminal.open(document.getElementById('terminal-container'));
+        fitAddon.fit();
+
+        // 窗口大小改变时重新适配
+        window.addEventListener('resize', () => {
+            fitAddon.fit();
+            if (window.bridge && window.bridge.onResize) {
+                window.bridge.onResize(terminal.rows, terminal.cols);
+            }
+        });
+
+        // 建立 Qt WebChannel 连接
+        new QWebChannel(qt.webChannelTransport, function(channel) {
+            window.bridge = channel.objects.terminalBridge;
+
+            // 用户输入 -> 后端
+            terminal.onData(data => {
+                if (window.bridge) window.bridge.sendData(data);
+            });
+
+            // 后端输出 -> 终端
+            window.bridge.outputReceived.connect(text => {
+                terminal.write(text);
+            });
+
+            // 通知后端终端初始尺寸
+            if (window.bridge.onResize) {
+                window.bridge.onResize(terminal.rows, terminal.cols);
+            }
+        });
+    })();
+</script>
+</body>
+</html>

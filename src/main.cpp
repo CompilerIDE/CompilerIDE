@@ -1,8 +1,8 @@
 /*
  *  Copyright (C) 2026 Compiler IDE Team
  *  介绍：CompilerIDE 是由 Compiler IDE Team 开发的一款IDE，采用 GPL 3.0 协议开源，内置数据评测器、竞赛模式、洛谷题目爬取器、对拍器等众多功能
- *  源码：20000+ 行
- *  AI 创作声明：本 IDE 部分内容使用 DeepSeek、Claude、Gemini 等辅助生成
+ *  源码：30000+ 行
+ *  AI 创作声明：本 IDE 部分内容使用 DeepSeek、Kimi、GPT 等人工智能模型辅助生成
  *  创作不易，如果你喜欢，可以在 Github 上点一个 Star 哦
 */
 #ifndef NOMINMAX
@@ -22,6 +22,8 @@
 #include <QtCharts/QLineSeries>
 #include <QtCharts/QValueAxis>
 #include <QtCharts/QDateTimeAxis>
+#include <QtCharts/QAbstractAxis>
+#include <QtCharts/QLegend>
 #include <QVBoxLayout>
 #include <QPdfView>
 #include <QPdfDocument>
@@ -36,6 +38,7 @@
 #include <QPushButton>
 #include <QFrame>
 #include <QBuffer>
+#include <QButtonGroup>
 #include <QGraphicsDropShadowEffect>
 #include <QWebEngineView>
 #include <QWebEnginePage>
@@ -112,7 +115,10 @@
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QTextDocument>
+#include <QTextFragment>
+#include <QTextLayout>
 #include <QStyleFactory>
+#include <QStyleOption>
 #include <QPalette>
 #include <QTabWidget>
 #include <QSplitter>
@@ -126,6 +132,7 @@
 #include <QTextDocumentFragment>
 #include <QTextBlockUserData>
 #include <QScrollArea>
+#include <QScreen>
 #include <QTemporaryFile>
 #include <QPropertyAnimation>
 #include <QEasingCurve>
@@ -143,6 +150,7 @@
 #include <QSaveFile>
 #include <QFile>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QDateTime>
 #include <QSet>
 #include <QSignalBlocker>
@@ -163,10 +171,17 @@
 
 #pragma comment(lib, "windowsapp.lib")
 
-const QString IDE_VERSION = "3.6.0";
+const QString IDE_VERSION = "3.7.0";
 
-const QString BUILD_DATE = "2026-07-05";
-const QString BUILD_TIME = "14:52:36";
+const QString BUILD_DATE = "2026-08-04";
+const QString BUILD_TIME = "12:40:53";
+
+enum class ThemeMode
+{
+    Light = 0,
+    EyeCare = 1,
+    Dark = 2
+};
 
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
 #include <QTextCodec>
@@ -188,6 +203,66 @@ public:
         }
 
         QProxyStyle::drawPrimitive(element, option, painter, widget);
+    }
+
+    void drawControl(ControlElement element, const QStyleOption *option,
+                     QPainter *painter, const QWidget *widget) const override
+    {
+        if (element != CE_MenuItem)
+        {
+            QProxyStyle::drawControl(element, option, painter, widget);
+            return;
+        }
+
+        const QStyleOptionMenuItem *menuItem = qstyleoption_cast<const QStyleOptionMenuItem *>(option);
+        const QMenu *menu = qobject_cast<const QMenu *>(widget);
+        if (!menu || !menuItem || menuItem->checkType == QStyleOptionMenuItem::NotCheckable)
+        {
+            QProxyStyle::drawControl(element, option, painter, widget);
+            return;
+        }
+
+        QStyleOptionMenuItem itemOption(*menuItem);
+        itemOption.checkType = QStyleOptionMenuItem::NotCheckable;
+        itemOption.checked = false;
+        itemOption.maxIconWidth = qMax(itemOption.maxIconWidth, 22);
+        QProxyStyle::drawControl(element, &itemOption, painter, widget);
+
+        const int indicatorSize = qBound(12, option->rect.height() - 10, 15);
+        QRect indicatorRect(option->rect.left() + 7,
+                            option->rect.center().y() - indicatorSize / 2,
+                            indicatorSize,
+                            indicatorSize);
+
+        if (option->direction == Qt::RightToLeft)
+        {
+            indicatorRect.moveRight(option->rect.right() - 7);
+        }
+
+        const QColor borderColor = option->palette.color(QPalette::ButtonText);
+        const QColor backgroundColor = option->palette.color(QPalette::Button);
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setPen(QPen(borderColor, 1));
+        painter->setBrush(backgroundColor);
+        painter->drawRoundedRect(indicatorRect, 2, 2);
+
+        if (menuItem->checked)
+        {
+            QPen markPen(borderColor, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+            painter->setPen(markPen);
+            const QPoint first(indicatorRect.left() + 3,
+                               indicatorRect.center().y());
+            const QPoint second(indicatorRect.left() + indicatorRect.width() / 2 - 1,
+                                indicatorRect.bottom() - 3);
+            const QPoint third(indicatorRect.right() - 2,
+                               indicatorRect.top() + 3);
+            painter->drawLine(first, second);
+            painter->drawLine(second, third);
+        }
+
+        painter->restore();
     }
 
     int pixelMetric(PixelMetric metric, const QStyleOption *option, const QWidget *widget) const override
@@ -575,7 +650,7 @@ public:
                             bool autoIndent = true,
                             int indentSize = 4,
                             bool lineNumbers = true,
-                            bool darkTheme = true,
+                            ThemeMode currentTheme = ThemeMode::Dark,
                             bool codeBeautify = true,
                             bool codeCompletion = true,
                             const QFont &editorFont = QFont("Consolas", 11));
@@ -587,7 +662,7 @@ public:
     bool getAutoIndent() const;
     int getIndentSize() const;
     bool getLineNumbers() const;
-    bool getDarkTheme() const;
+    ThemeMode getThemeMode() const;
     bool getCodeCompletion() const;
     bool getCodeBeautify() const;
     QFont getEditorFont() const;
@@ -621,7 +696,7 @@ private:
     QCheckBox *lineNumbersCheck;
     QListWidget *customCompletionList;
     QLineEdit *newCompletionEdit;
-    QCheckBox *darkThemeCheck;
+    QComboBox *themeCombo;
     QComboBox *uiStyleCombo;
 
     QString findCompilerInPath(const QString &basePath);
@@ -631,19 +706,44 @@ private:
     void saveCustomCompletions();
 };
 
-SettingsDialog::SettingsDialog(QWidget *parent, const QString &currentCompilerPath,
+SettingsDialog::SettingsDialog(QWidget *parent,
+                               const QString &currentCompilerPath,
                                const QString &currentDebuggerPath,
-                               bool autoBrackets, bool autoQuotes, bool autoIndent,
-                               int indentSize, bool lineNumbers,
-                               bool darkTheme, bool codeBeautify, bool codeCompletion, const QFont &editorFont)
+                               bool autoBrackets,
+                               bool autoQuotes,
+                               bool autoIndent,
+                               int indentSize,
+                               bool lineNumbers,
+                               ThemeMode currentTheme,
+                               bool codeBeautify,
+                               bool codeCompletion,
+                               const QFont &editorFont)
     : QDialog(parent)
 {
+    const bool darkTheme = currentTheme == ThemeMode::Dark;
+    const bool eyeCareTheme = currentTheme == ThemeMode::EyeCare;
+
     setWindowTitle(tr("设置 - Compiler IDE %1").arg(IDE_VERSION));
     setModal(true);
     setMinimumSize(750, 500);
     resize(800, 550);
 
-    qDebug() << "[SettingsDialog] 初始字体:" << editorFont.family() << editorFont.pointSize();
+    if (eyeCareTheme)
+    {
+        QPalette eyeCarePalette = palette();
+        eyeCarePalette.setColor(QPalette::Window, QColor("#FDF6E3"));
+        eyeCarePalette.setColor(QPalette::Base, QColor("#FDF6E3"));
+        eyeCarePalette.setColor(QPalette::AlternateBase, QColor("#F5EEDB"));
+        eyeCarePalette.setColor(QPalette::Button, QColor("#F5EEDB"));
+        eyeCarePalette.setColor(QPalette::Text, QColor("#3B3A32"));
+        eyeCarePalette.setColor(QPalette::WindowText, QColor("#3B3A32"));
+        eyeCarePalette.setColor(QPalette::ButtonText, QColor("#3B3A32"));
+        setPalette(eyeCarePalette);
+    }
+
+    qDebug() << "[SettingsDialog] 初始字体:"
+             << editorFont.family()
+             << editorFont.pointSize();
 
     QHBoxLayout *mainLayout = new QHBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
@@ -662,6 +762,13 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QString &currentCompilerPa
                                    "QListWidget::item { padding: 14px 20px; color: #333333; border-radius: 0px; margin: 2px 0px; }"
                                    "QListWidget::item:selected { background: #ffffff; color: #000000; border-left: 3px solid #0d6efd; }"
                                    "QListWidget::item:hover:!selected { background: #e8e8e8; }";
+    if (eyeCareTheme)
+    {
+        navStyle = "QListWidget { background: #F3E8C8; border: none; padding-top: 8px; }"
+                   "QListWidget::item { padding: 14px 20px; color: #3B3A32; border-radius: 0px; margin: 2px 0px; }"
+                   "QListWidget::item:selected { background: #E5D9B7; color: #2F3528; border-left: 3px solid #6F8F5B; }"
+                   "QListWidget::item:hover:!selected { background: #EDE2C3; }";
+    }
     navList->setStyleSheet(navStyle);
 
     QListWidgetItem *compilerItem = new QListWidgetItem(tr("  编译器设置"));
@@ -674,13 +781,22 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QString &currentCompilerPa
     navList->setCurrentRow(0);
 
     QWidget *rightPanel = new QWidget;
+    rightPanel->setObjectName("SettingsRightPanel");
+    if (eyeCareTheme)
+    {
+        rightPanel->setStyleSheet(
+            "QWidget#SettingsRightPanel { background-color: #FDF6E3; }"
+            "QStackedWidget { background-color: #FDF6E3; }"
+            "QScrollArea { background-color: #FDF6E3; border: none; }"
+            "QScrollArea > QWidget > QWidget { background-color: #FDF6E3; }");
+    }
     QVBoxLayout *rightLayout = new QVBoxLayout(rightPanel);
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(0);
 
     QStackedWidget *contentStack = new QStackedWidget;
 
-    QString infoTextColor = darkTheme ? "#AAAAAA" : "#666666";
+    QString infoTextColor = darkTheme ? "#AAAAAA" : eyeCareTheme ? "#6B6658" : "#666666";
 
     QString groupBoxStyle = QString(
                                 "QGroupBox {"
@@ -695,7 +811,7 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QString &currentCompilerPa
                                 "    left: 16px;"
                                 "    padding: 0 8px;"
                                 "}")
-                                .arg(darkTheme ? "#4A5F7F" : "#D0D0D0");
+                                .arg(darkTheme ? "#4A5F7F" : eyeCareTheme ? "#C7B98E" : "#D0D0D0");
 
     QWidget *compilerPage = new QWidget;
     QVBoxLayout *compilerPageLayout = new QVBoxLayout(compilerPage);
@@ -856,10 +972,22 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QString &currentCompilerPa
     lineNumbersCheck = new QCheckBox(tr("显示行号"));
     lineNumbersCheck->setChecked(lineNumbers);
 
-    darkThemeCheck = new QCheckBox(tr("使用暗色主题"));
-    darkThemeCheck->setChecked(darkTheme);
+    themeCombo = new QComboBox;
+    themeCombo->addItem(tr("亮色模式"),
+                        static_cast<int>(ThemeMode::Light));
+    themeCombo->addItem(tr("护眼模式"),
+                        static_cast<int>(ThemeMode::EyeCare));
+    themeCombo->addItem(tr("暗色模式"),
+                        static_cast<int>(ThemeMode::Dark));
 
-    editorLayout->addRow(darkThemeCheck);
+    int themeIndex = themeCombo->findData(static_cast<int>(currentTheme));
+    if (themeIndex < 0)
+    {
+        themeIndex = themeCombo->findData(static_cast<int>(ThemeMode::Dark));
+    }
+    themeCombo->setCurrentIndex(themeIndex);
+    editorLayout->addRow(tr("主题:"), themeCombo);
+
     splashCheck = new QCheckBox(tr("启用启动界面"));
     welcomeCheck = new QCheckBox(tr("启用欢迎界面"));
     splashCheck->setChecked(settings.value("enableSplash", false).toBool());
@@ -907,7 +1035,7 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QString &currentCompilerPa
                 "    left: 16px;"
                 "    padding: 0 8px;"
                 "}")
-            .arg(darkTheme ? "#4A5F7F" : "#D0D0D0"));
+            .arg(darkTheme ? "#4A5F7F" : eyeCareTheme ? "#C7B98E" : "#D0D0D0"));
     QVBoxLayout *customCompLayout = new QVBoxLayout(customCompGroup);
     customCompLayout->setSpacing(12);
 
@@ -932,10 +1060,10 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QString &currentCompilerPa
                             "QLineEdit:focus {"
                             "    border: 1px solid %4;"
                             "}")
-                            .arg(darkTheme ? "#5A5F7A" : "#CCCCCC",
-                                 darkTheme ? "#2D2D2D" : "#FFFFFF",
-                                 darkTheme ? "#F0F0F0" : "#000000",
-                                 darkTheme ? "#2E86AB" : "#0d6efd");
+                            .arg(darkTheme ? "#5A5F7A" : eyeCareTheme ? "#B9AA7D" : "#CCCCCC",
+                                 darkTheme ? "#2D2D2D" : eyeCareTheme ? "#F8EFCF" : "#FFFFFF",
+                                 darkTheme ? "#F0F0F0" : eyeCareTheme ? "#3B3A32" : "#000000",
+                                 darkTheme ? "#2E86AB" : eyeCareTheme ? "#6F8F5B" : "#0d6efd");
     newCompletionEdit->setStyleSheet(editStyle);
     if (darkTheme)
     {
@@ -984,12 +1112,12 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QString &currentCompilerPa
                             "QListWidget::item:hover:!selected {"
                             "    background: %6;"
                             "}")
-                            .arg(darkTheme ? "#1e1e1e" : "#FFFFFF",
-                                 darkTheme ? "#F0F0F0" : "#000000",
-                                 darkTheme ? "#555555" : "#CCCCCC",
-                                 darkTheme ? "#2D2D2D" : "#E0E0E0",
-                                 darkTheme ? "#264F78" : "#0d6efd",
-                                 darkTheme ? "#2A2D2E" : "#F0F0F0");
+                            .arg(darkTheme ? "#1e1e1e" : eyeCareTheme ? "#F8EFCF" : "#FFFFFF",
+                                 darkTheme ? "#F0F0F0" : eyeCareTheme ? "#3B3A32" : "#000000",
+                                 darkTheme ? "#555555" : eyeCareTheme ? "#B9AA7D" : "#CCCCCC",
+                                 darkTheme ? "#2D2D2D" : eyeCareTheme ? "#E7D9AE" : "#E0E0E0",
+                                 darkTheme ? "#264F78" : eyeCareTheme ? "#7F9E68" : "#0d6efd",
+                                 darkTheme ? "#2A2D2E" : eyeCareTheme ? "#EFE3C2" : "#F0F0F0");
     customCompletionList->setStyleSheet(listStyle);
 
     QPushButton *removeCustomCompBtn = new QPushButton(tr("删除选中词条"));
@@ -1098,6 +1226,21 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QString &currentCompilerPa
                                     "QPushButton:pressed {"
                                     "    background-color: #dae0e5;"
                                     "}");
+        if (eyeCareTheme)
+        {
+            cancelButton->setStyleSheet(baseStyle +
+                                        "QPushButton {"
+                                        "    background-color: #E9DDBB;"
+                                        "    color: #3B3A32;"
+                                        "    border: 1px solid #B9AA7D;"
+                                        "}"
+                                        "QPushButton:hover {"
+                                        "    background-color: #DFD1AA;"
+                                        "}"
+                                        "QPushButton:pressed {"
+                                        "    background-color: #D4C49A;"
+                                        "}");
+        }
     }
 
     connect(buttonBox, &QDialogButtonBox::accepted, this, [this]()
@@ -1445,9 +1588,23 @@ bool SettingsDialog::getLineNumbers() const
     return lineNumbersCheck->isChecked();
 }
 
-bool SettingsDialog::getDarkTheme() const
+ThemeMode SettingsDialog::getThemeMode() const
 {
-    return darkThemeCheck->isChecked();
+    if (!themeCombo)
+    {
+        return ThemeMode::Dark;
+    }
+
+    bool ok = false;
+    int value = themeCombo->currentData().toInt(&ok);
+    if (!ok ||
+        value < static_cast<int>(ThemeMode::Light) ||
+        value > static_cast<int>(ThemeMode::Dark))
+    {
+        return ThemeMode::Dark;
+    }
+
+    return static_cast<ThemeMode>(value);
 }
 
 void SettingsDialog::browseCompilerPath()
@@ -1969,6 +2126,7 @@ void WelcomeDialog::saveRecentFiles()
 {
     QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
     settings.setValue("recentFiles", recentFiles);
+    settings.sync();
 }
 
 void WelcomeDialog::addToRecentFiles(const QString &filePath)
@@ -2023,6 +2181,7 @@ void WelcomeDialog::onRecentFileClicked(QListWidgetItem *item)
             selectedFile = filePath;
             recentFiles.removeAll(filePath);
             recentFiles.prepend(filePath);
+            saveRecentFiles();
             accept();
         }
         else
@@ -2030,6 +2189,7 @@ void WelcomeDialog::onRecentFileClicked(QListWidgetItem *item)
             QMessageBox::warning(this, "文件不存在", "所选文件不存在，已从最近文件列表中移除。");
             recentFiles.removeAll(filePath);
             delete recentList->takeItem(recentList->row(item));
+            saveRecentFiles();
         }
     }
 }
@@ -2659,8 +2819,13 @@ public:
         warningLine = -1;
         viewport()->update();
     }
+    void setThemeMode(ThemeMode mode);
 
 private:
+    void updateFontDependentLayout();
+    int leadingIndentColumns(const QTextBlock &block) const;
+    qreal blockTextPositionX(const QTextBlock &block, int characterOffset) const;
+    qreal indentGuideX(const QTextBlock &block, int visualColumn) const;
     CodeCompleter *completer;
     QListView *completionList;
     QWidget *completionPopup;
@@ -2687,7 +2852,7 @@ private:
         int m_dragStartY;
         int m_dragStartValue;
     };
-    MiniMapScrollBar *m_miniMap;
+    MiniMapScrollBar *m_miniMap = nullptr;
     QSet<int> m_errorLines;
     QSet<int> m_warningLines;
     QSet<int> m_matchLines;
@@ -2807,6 +2972,7 @@ private:
     int indentSize;
     bool lineNumbers;
     bool darkTheme;
+    ThemeMode themeMode = ThemeMode::Dark;
 
     bool comp_disableAutoBrackets;
     bool comp_disableAutoQuotes;
@@ -3051,11 +3217,12 @@ void CodeEditor::MiniMapScrollBar::paintEvent(QPaintEvent *event)
 
     QPainter painter(this);
     const bool dark = m_editor && m_editor->darkTheme;
-    const QColor backgroundColor = dark ? QColor(40, 40, 40) : QColor(245, 245, 245);
-    const QColor sliderColor = dark ? QColor(100, 100, 100, 200) : QColor(185, 185, 185, 210);
-    const QColor matchColor = dark ? QColor(150, 150, 150, 130) : QColor(105, 105, 105, 120);
-    const QColor selectionColor = dark ? QColor(190, 190, 190, 120) : QColor(70, 120, 190, 100);
-    const QColor cursorColor = dark ? QColor(235, 235, 235, 230) : QColor(55, 55, 55, 220);
+    const bool eyeCare = m_editor && m_editor->themeMode == ThemeMode::EyeCare;
+    const QColor backgroundColor = dark ? QColor(40, 40, 40) : eyeCare ? QColor("#F3E8C8") : QColor(245, 245, 245);
+    const QColor sliderColor = dark ? QColor(100, 100, 100, 200) : eyeCare ? QColor(177, 163, 123, 190) : QColor(185, 185, 185, 210);
+    const QColor matchColor = dark ? QColor(150, 150, 150, 130) : eyeCare ? QColor(112, 105, 82, 125) : QColor(105, 105, 105, 120);
+    const QColor selectionColor = dark ? QColor(190, 190, 190, 120) : eyeCare ? QColor(111, 143, 91, 105) : QColor(70, 120, 190, 100);
+    const QColor cursorColor = dark ? QColor(235, 235, 235, 230) : eyeCare ? QColor(59, 58, 50, 220) : QColor(55, 55, 55, 220);
     painter.fillRect(rect(), backgroundColor);
 
     if (!m_editor || !m_editor->document())
@@ -3552,6 +3719,32 @@ void CodeEditor::updateCompletionListStyle()
             "    background-color: #3d3d3d;"
             "}");
     }
+    else if (themeMode == ThemeMode::EyeCare)
+    {
+        completionList->setStyleSheet(
+            "QListView {"
+            "    background-color: #F8EFCF;"
+            "    color: #3B3A32;"
+            "    border: 1px solid #B9AA7D;"
+            "    font-family: 'Consolas', 'Courier New', monospace;"
+            "    font-size: 12px;"
+            "    outline: none;"
+            "}"
+            "QListView::item {"
+            "    padding: 4px 8px;"
+            "}"
+            "QListView::item:selected {"
+            "    background-color: #7F9E68;"
+            "    color: white;"
+            "}"
+            "QListView::item:hover {"
+            "    background-color: #E9DDBB;"
+            "}"
+            "QListView::item:selected:hover {"
+            "    background-color: #7F9E68;"
+            "    color: white;"
+            "}");
+    }
     else
     {
         completionList->setStyleSheet(
@@ -3572,6 +3765,10 @@ void CodeEditor::updateCompletionListStyle()
             "}"
             "QListView::item:hover {"
             "    background-color: #f0f0f0;"
+            "}"
+            "QListView::item:selected:hover {"
+            "    background-color: #0078d4;"
+            "    color: white;"
             "}");
     }
 }
@@ -3626,8 +3823,8 @@ void CodeEditor::setAutoIndentEnabled(bool enabled)
 
 void CodeEditor::setIndentSize(int size)
 {
-    indentSize = size;
-    setTabStopDistance(indentSize * fontMetrics().horizontalAdvance(' '));
+    indentSize = qMax(1, size);
+    updateFontDependentLayout();
 }
 
 void CodeEditor::setErrorLine(int blockNumber)
@@ -4222,24 +4419,55 @@ void CodeEditor::setLineNumbersEnabled(bool enabled)
 
 void CodeEditor::setDarkThemeEnabled(bool enabled)
 {
-    darkTheme = enabled;
+    setThemeMode(enabled ? ThemeMode::Dark : ThemeMode::Light);
+}
 
-    const QColor baseColor = enabled ? QColor(30, 30, 30) : QColor(255, 255, 255);
-    const QColor textColor = enabled ? QColor(220, 220, 220) : QColor(0, 0, 0);
-    const QColor selectionColor = enabled ? QColor(42, 130, 218) : QColor(0, 120, 215);
-    const QColor selectedTextColor = enabled ? QColor(0, 0, 0) : QColor(255, 255, 255);
+void CodeEditor::setThemeMode(ThemeMode mode)
+{
+    themeMode = mode;
+    darkTheme = mode == ThemeMode::Dark;
 
-    if (enabled)
+    const bool eyeCare = mode == ThemeMode::EyeCare;
+
+    const QColor baseColor =
+        darkTheme ? QColor("#1E1E1E")
+                  : eyeCare ? QColor("#FDF6E3")
+                            : QColor("#FFFFFF");
+
+    const QColor textColor =
+        darkTheme ? QColor("#DCDCDC")
+                  : eyeCare ? QColor("#3B3A32")
+                            : QColor("#000000");
+
+    const QColor selectionColor =
+        darkTheme ? QColor("#2A82DA")
+                  : eyeCare ? QColor("#B8D7A3")
+                            : QColor("#0078D7");
+
+    const QColor selectedTextColor =
+        darkTheme ? QColor("#000000")
+                  : QColor("#FFFFFF");
+
+    if (darkTheme)
     {
         errorBgColor = QColor(80, 40, 40);
         warningBgColor = QColor(80, 70, 40);
-        lineNumberArea->setStyleSheet("background: #2D2D2D; color: #888888;");
+        lineNumberArea->setStyleSheet(
+            "background: #2D2D2D; color: #888888;");
+    }
+    else if (eyeCare)
+    {
+        errorBgColor = QColor("#F1D1C8");
+        warningBgColor = QColor("#F3E3B3");
+        lineNumberArea->setStyleSheet(
+            "background: #E9DDBB; color: #555A48;");
     }
     else
     {
         errorBgColor = QColor(255, 230, 230);
         warningBgColor = QColor(255, 245, 220);
-        lineNumberArea->setStyleSheet("background: #F5F5F5; color: #666666;");
+        lineNumberArea->setStyleSheet(
+            "background: #F5F5F5; color: #666666;");
     }
 
     QPalette editorPalette = palette();
@@ -4257,24 +4485,29 @@ void CodeEditor::setDarkThemeEnabled(bool enabled)
         viewport()->setAutoFillBackground(true);
     }
 
-    setStyleSheet(QString(
-                      "QPlainTextEdit {"
-                      "background-color: %1;"
-                      "color: %2;"
-                      "selection-background-color: %3;"
-                      "selection-color: %4;"
-                      "}")
-                      .arg(baseColor.name(), textColor.name(),
-                           selectionColor.name(), selectedTextColor.name()));
+    setStyleSheet(
+        QString(
+            "QPlainTextEdit {"
+            "    background-color: %1;"
+            "    color: %2;"
+            "    selection-background-color: %3;"
+            "    selection-color: %4;"
+            "}")
+            .arg(baseColor.name(),
+                 textColor.name(),
+                 selectionColor.name(),
+                 selectedTextColor.name()));
 
     updateCompletionListStyle();
 
-    const QList<CppHighlighter *> highlighters = document()->findChildren<CppHighlighter *>();
+    const QList<CppHighlighter *> highlighters =
+        document()->findChildren<CppHighlighter *>();
+
     for (CppHighlighter *highlighter : highlighters)
     {
         if (highlighter)
         {
-            highlighter->setDarkTheme(enabled);
+            highlighter->setDarkTheme(darkTheme);
         }
     }
 
@@ -4377,30 +4610,34 @@ void CodeEditor::wheelEvent(QWheelEvent *event)
 {
     if (event->modifiers() & Qt::ControlModifier)
     {
-        QPoint angleDelta = event->angleDelta();
+        const QPoint angleDelta = event->angleDelta();
 
         if (!angleDelta.isNull())
         {
             QFont currentFont = font();
             int currentSize = currentFont.pointSize();
 
+            if (currentSize < 1)
+            {
+                currentSize = 11;
+            }
+
+            int newSize = currentSize;
             if (angleDelta.y() > 0)
             {
-                currentSize = qMin(currentSize + 1, 72);
+                newSize = qMin(currentSize + 1, 72);
             }
             else if (angleDelta.y() < 0)
             {
-                currentSize = qMax(currentSize - 1, 6);
+                newSize = qMax(currentSize - 1, 6);
             }
 
-            currentFont.setPointSize(currentSize);
-            setFont(currentFont);
-
-            setTabStopDistance(indentSize * fontMetrics().horizontalAdvance(' '));
-
-            updateLineNumberAreaWidth(0);
-
-            emit fontSizeChanged(currentSize);
+            if (newSize != currentSize)
+            {
+                currentFont.setPointSize(newSize);
+                setEditorFont(currentFont);
+                emit fontSizeChanged(newSize);
+            }
 
             event->accept();
             return;
@@ -4577,9 +4814,136 @@ bool CodeEditor::isPositionInCommentOrString() const
 void CodeEditor::setEditorFont(const QFont &font)
 {
     qDebug() << "[CodeEditor] 应用字体:" << font.family() << font.pointSize();
-    setFont(font);
-    setTabStopDistance(indentSize * fontMetrics().horizontalAdvance(' '));
+
+    QFont editorFont = font;
+    if (editorFont.pointSize() < 1 && editorFont.pixelSize() < 1)
+    {
+        editorFont.setPointSize(11);
+    }
+
+    QPlainTextEdit::setFont(editorFont);
+    document()->setDefaultFont(editorFont);
+    updateFontDependentLayout();
+}
+
+void CodeEditor::updateFontDependentLayout()
+{
+    const int safeIndentSize = qMax(1, indentSize);
+    const QFontMetricsF metrics(font());
+    const qreal spaceWidth = qMax<qreal>(1.0, metrics.horizontalAdvance(QLatin1Char(' ')));
+    const qreal newTabStopDistance = qMax<qreal>(1.0, safeIndentSize * spaceWidth);
+
+    if (!qFuzzyCompare(tabStopDistance() + 1.0, newTabStopDistance + 1.0))
+    {
+        setTabStopDistance(newTabStopDistance);
+    }
+
     updateLineNumberAreaWidth(0);
+    document()->markContentsDirty(0, document()->characterCount());
+    viewport()->update();
+
+    if (lineNumberArea)
+    {
+        lineNumberArea->update();
+    }
+
+    if (m_miniMap)
+    {
+        m_miniMap->update();
+    }
+
+    QTimer::singleShot(0, this, [this]()
+    {
+        viewport()->update();
+        if (lineNumberArea)
+        {
+            lineNumberArea->update();
+        }
+    });
+}
+
+int CodeEditor::leadingIndentColumns(const QTextBlock &block) const
+{
+    const QString text = block.text();
+    const int safeIndentSize = qMax(1, indentSize);
+    int columns = 0;
+
+    for (const QChar character : text)
+    {
+        if (character == QLatin1Char(' '))
+        {
+            ++columns;
+        }
+        else if (character == QLatin1Char('\t'))
+        {
+            columns = ((columns / safeIndentSize) + 1) * safeIndentSize;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    return columns;
+}
+
+qreal CodeEditor::blockTextPositionX(const QTextBlock &block, int characterOffset) const
+{
+    QTextCursor blockCursor(block);
+    const qreal blockStartX = cursorRect(blockCursor).left();
+    QTextLayout *layout = block.layout();
+
+    if (!layout || layout->lineCount() < 1)
+    {
+        return blockStartX;
+    }
+
+    const int textLength = static_cast<int>(block.text().size());
+    const int boundedOffset = qBound(0, characterOffset, textLength);
+    QTextLine line = layout->lineForTextPosition(boundedOffset);
+
+    if (!line.isValid())
+    {
+        line = layout->lineAt(0);
+    }
+
+    const qreal lineStartX = line.cursorToX(line.textStart());
+    const qreal positionX = line.cursorToX(boundedOffset);
+    return blockStartX + positionX - lineStartX;
+}
+
+qreal CodeEditor::indentGuideX(const QTextBlock &block, int visualColumn) const
+{
+    const QString text = block.text();
+    const int safeIndentSize = qMax(1, indentSize);
+    int columns = 0;
+
+    for (int characterIndex = 0; characterIndex < text.size(); ++characterIndex)
+    {
+        const QChar character = text.at(characterIndex);
+
+        if (character == QLatin1Char(' '))
+        {
+            ++columns;
+        }
+        else if (character == QLatin1Char('\t'))
+        {
+            columns = ((columns / safeIndentSize) + 1) * safeIndentSize;
+        }
+        else
+        {
+            break;
+        }
+
+        if (columns >= visualColumn)
+        {
+            return blockTextPositionX(block, characterIndex + 1);
+        }
+    }
+
+    const qreal blockStartX = blockTextPositionX(block, 0);
+    return blockStartX +
+           (static_cast<qreal>(visualColumn) / safeIndentSize) * tabStopDistance();
 }
 
 void CodeEditor::highlightCurrentLine()
@@ -4595,13 +4959,17 @@ void CodeEditor::updateExtraSelections()
     {
         QTextEdit::ExtraSelection currentLineSelection;
         QColor lineColor;
-        if (darkTheme)
+        if (themeMode == ThemeMode::Dark)
         {
-            lineColor = QColor(45, 45, 45);
+            lineColor = QColor("#2D2D2D");
+        }
+        else if (themeMode == ThemeMode::EyeCare)
+        {
+            lineColor = QColor("#F8EFCF");
         }
         else
         {
-            lineColor = QColor(240, 240, 240);
+            lineColor = QColor("#F0F0F0");
         }
 
         currentLineSelection.format.setBackground(lineColor);
@@ -4671,17 +5039,23 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
     painter.setFont(this->font());
 
     QColor backgroundColor, textColor, currentLineColor;
-    if (darkTheme)
+    if (themeMode == ThemeMode::Dark)
     {
-        backgroundColor = QColor(45, 45, 45);
-        textColor = QColor(150, 150, 150);
-        currentLineColor = QColor(60, 60, 60);
+        backgroundColor = QColor("#2D2D2D");
+        textColor = QColor("#969696");
+        currentLineColor = QColor("#3C3C3C");
+    }
+    else if (themeMode == ThemeMode::EyeCare)
+    {
+        backgroundColor = QColor("#F3E8C8");
+        textColor = QColor("#746F61");
+        currentLineColor = QColor("#E9DDBB");
     }
     else
     {
-        backgroundColor = QColor(245, 245, 245);
-        textColor = QColor(100, 100, 100);
-        currentLineColor = QColor(230, 230, 230);
+        backgroundColor = QColor("#F5F5F5");
+        textColor = QColor("#646464");
+        currentLineColor = QColor("#E6E6E6");
     }
 
     painter.fillRect(event->rect(), backgroundColor);
@@ -4779,114 +5153,141 @@ void CodeEditor::mousePressEvent(QMouseEvent *event)
 void CodeEditor::paintEvent(QPaintEvent *event)
 {
     QPlainTextEdit::paintEvent(event);
-    if (!showIndentGuides)
+
+    if (!showIndentGuides || indentSize < 1)
     {
         return;
     }
 
     QPainter painter(viewport());
-    QColor guideColor = darkTheme ? QColor(80, 80, 80, 255) : QColor(210, 210, 210, 255);
-    painter.setPen(QPen(guideColor, 0, Qt::SolidLine));
     painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.setClipRect(event->rect());
 
-    QFontMetricsF fm(font());
-    qreal spaceWidth = fm.horizontalAdvance(' ');
-    qreal docMargin = document()->documentMargin();
+    QColor guideColor;
+    if (themeMode == ThemeMode::Dark)
+    {
+        guideColor = QColor(105, 105, 105, 190);
+    }
+    else if (themeMode == ThemeMode::EyeCare)
+    {
+        guideColor = QColor(155, 145, 120, 170);
+    }
+    else
+    {
+        guideColor = QColor(175, 175, 175, 180);
+    }
+
+    const qreal devicePixelRatio = qMax<qreal>(1.0, viewport()->devicePixelRatioF());
+    QPen guidePen(guideColor);
+    guidePen.setStyle(Qt::SolidLine);
+    guidePen.setWidthF(1.0 / devicePixelRatio);
+    painter.setPen(guidePen);
 
     QTextBlock block = firstVisibleBlock();
-    QPointF offset = contentOffset();
-    qreal yPos = blockBoundingGeometry(block).translated(offset).top();
-
-    auto getLeadingSpaces = [&](const QTextBlock &b) -> int
-    {
-        QString t = b.text();
-        int spaces = 0;
-        for (int i = 0; i < t.length(); ++i)
-        {
-            if (t[i] == ' ')
-            {
-                spaces++;
-            }
-            else if (t[i] == '	')
-            {
-                spaces = ((spaces / indentSize) + 1) * indentSize;
-            }
-            else
-            {
-                break;
-            }
-        }
-        return spaces;
-    };
+    const QPointF offset = contentOffset();
 
     while (block.isValid())
     {
-        QRectF r = blockBoundingRect(block);
-        if (yPos > viewport()->height())
+        const QRectF blockGeometry = blockBoundingGeometry(block).translated(offset);
+        const QRectF blockRect = blockBoundingRect(block);
+        const qreal top = blockGeometry.top();
+        const qreal bottom = top + blockRect.height();
+
+        if (top > event->rect().bottom())
         {
             break;
         }
 
-        if (yPos + r.height() >= 0)
+        if (bottom >= event->rect().top())
         {
-            QString text = block.text();
-            bool isBlank = text.trimmed().isEmpty();
+            const QString text = block.text();
+            const bool isBlank = text.trimmed().isEmpty();
             int drawDepth = 0;
 
             if (!isBlank)
             {
-                drawDepth = getLeadingSpaces(block);
+                drawDepth = leadingIndentColumns(block);
             }
             else
             {
-                QTextBlock prev = block.previous();
-                while (prev.isValid() && prev.text().trimmed().isEmpty())
+                QTextBlock previousBlock = block.previous();
+                while (previousBlock.isValid() && previousBlock.text().trimmed().isEmpty())
                 {
-                    prev = prev.previous();
+                    previousBlock = previousBlock.previous();
                 }
 
-                QTextBlock next = block.next();
-                while (next.isValid() && next.text().trimmed().isEmpty())
+                QTextBlock nextBlock = block.next();
+                while (nextBlock.isValid() && nextBlock.text().trimmed().isEmpty())
                 {
-                    next = next.next();
+                    nextBlock = nextBlock.next();
                 }
 
-                int aboveIndent = 0;
-                int belowIndent = 0;
+                int previousIndent = 0;
+                int nextIndent = 0;
 
-                if (prev.isValid())
+                if (previousBlock.isValid())
                 {
-                    aboveIndent = getLeadingSpaces(prev);
-                    if (prev.text().trimmed().endsWith('{'))
+                    previousIndent = leadingIndentColumns(previousBlock);
+                    if (previousBlock.text().trimmed().endsWith(QLatin1Char('{')))
                     {
-                        aboveIndent += indentSize;
-                    }
-                }
-                if (next.isValid())
-                {
-                    belowIndent = getLeadingSpaces(next);
-                    if (next.text().trimmed().startsWith('}'))
-                    {
-                        belowIndent += indentSize;
+                        previousIndent += indentSize;
                     }
                 }
 
-                drawDepth = qMin(aboveIndent, belowIndent);
+                if (nextBlock.isValid())
+                {
+                    nextIndent = leadingIndentColumns(nextBlock);
+                    if (nextBlock.text().trimmed().startsWith(QLatin1Char('}')))
+                    {
+                        nextIndent += indentSize;
+                    }
+                }
+
+                drawDepth = qMin(previousIndent, nextIndent);
             }
 
-            for (int col = indentSize; col < drawDepth; col += indentSize)
+            qreal firstContentX = 0.0;
+            if (!isBlank)
             {
-                int x = qFloor(offset.x() + docMargin + col * spaceWidth);
-                if (x >= 0 && x <= viewport()->width())
+                int firstContentOffset = 0;
+                while (firstContentOffset < text.size())
                 {
-                    qreal top = blockBoundingGeometry(block).translated(offset).top();
-                    qreal bottom = top + blockBoundingRect(block).height() - 0.5;
-                    painter.drawLine(x, qRound(top), x, qRound(bottom));
+                    const QChar character = text.at(firstContentOffset);
+                    if (character != QLatin1Char(' ') && character != QLatin1Char('\t'))
+                    {
+                        break;
+                    }
+                    ++firstContentOffset;
+                }
+
+                firstContentX = blockTextPositionX(block, firstContentOffset);
+            }
+
+            for (int column = indentSize; column < drawDepth; column += indentSize)
+            {
+                const qreal rawX = indentGuideX(block, column);
+                const qreal x = (qFloor(rawX * devicePixelRatio) + 0.5) / devicePixelRatio;
+
+                if (x < event->rect().left() - 1.0 || x > event->rect().right() + 1.0)
+                {
+                    continue;
+                }
+
+                if (!isBlank && x >= firstContentX - (1.0 / devicePixelRatio))
+                {
+                    continue;
+                }
+
+                const qreal snappedTop = qCeil(qMax<qreal>(top, event->rect().top()) * devicePixelRatio) / devicePixelRatio;
+                const qreal snappedBottom = qFloor(qMin<qreal>(bottom, event->rect().bottom() + 1.0) * devicePixelRatio) / devicePixelRatio;
+
+                if (snappedBottom > snappedTop)
+                {
+                    painter.drawLine(QPointF(x, snappedTop), QPointF(x, snappedBottom));
                 }
             }
         }
 
-        yPos += r.height();
         block = block.next();
     }
 }
@@ -5143,10 +5544,11 @@ private:
     QPushButton *createBtn;
     QPushButton *cancelBtn;
     bool isDarkTheme;
+    bool isEyeCareTheme;
 };
 
 NewFileDialog::NewFileDialog(QWidget *parent)
-    : QDialog(parent), selectedType(Cancelled), normalCard(nullptr), easyxCard(nullptr), selectedCard(nullptr), isDarkTheme(false)
+    : QDialog(parent), selectedType(Cancelled), normalCard(nullptr), easyxCard(nullptr), selectedCard(nullptr), isDarkTheme(false), isEyeCareTheme(false)
 {
     if (parent)
     {
@@ -5154,6 +5556,11 @@ NewFileDialog::NewFileDialog(QWidget *parent)
         if (themeVariant.isValid())
         {
             isDarkTheme = themeVariant.toBool();
+        }
+        QVariant themeModeVariant = parent->property("themeMode");
+        if (themeModeVariant.isValid())
+        {
+            isEyeCareTheme = themeModeVariant.toInt() == static_cast<int>(ThemeMode::EyeCare);
         }
     }
     setupUI();
@@ -5166,205 +5573,233 @@ NewFileDialog::~NewFileDialog()
 void NewFileDialog::setupUI()
 {
     setWindowTitle(tr("新建文件"));
-    setFixedSize(700, 550);
+    setFixedSize(720, 500);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+
+    const QString pageBackground = isDarkTheme ? "#242A32" : isEyeCareTheme ? "#F6EED9" : "#F4F7FB";
+    const QString surfaceBackground = isDarkTheme ? "#2D3540" : isEyeCareTheme ? "#FFF9E8" : "#FFFFFF";
+    const QString footerBackground = isDarkTheme ? "#29313B" : isEyeCareTheme ? "#F2E7C9" : "#F8FAFD";
+    const QString borderColor = isDarkTheme ? "#46515E" : isEyeCareTheme ? "#C9BC91" : "#D8E0EA";
+    const QString titleColor = isDarkTheme ? "#F2F5F8" : isEyeCareTheme ? "#35362E" : "#243244";
+    const QString secondaryColor = isDarkTheme ? "#AEB8C4" : isEyeCareTheme ? "#6B6658" : "#6E7B8B";
+    const QString accentColor = isDarkTheme ? "#79A7FF" : isEyeCareTheme ? "#728B60" : "#4B78D1";
+
+    setStyleSheet(QString("QDialog { background-color: %1; }").arg(pageBackground));
 
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->setSpacing(0);
     mainLayout->setContentsMargins(0, 0, 0, 0);
 
     QWidget *headerWidget = new QWidget(this);
-    headerWidget->setFixedHeight(80);
+    headerWidget->setFixedHeight(92);
     headerWidget->setStyleSheet(
-        "QWidget {"
-        "  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-        "              stop:0 #667eea, stop:1 #764ba2);"
-        "}");
+        QString(
+            "QWidget {"
+            "  background-color: %1;"
+            "  border-bottom: 1px solid %2;"
+            "}")
+            .arg(surfaceBackground, borderColor));
 
     QVBoxLayout *headerLayout = new QVBoxLayout(headerWidget);
-    headerLayout->setContentsMargins(30, 15, 30, 15);
+    headerLayout->setContentsMargins(32, 18, 32, 16);
+    headerLayout->setSpacing(4);
 
     QLabel *titleLabel = new QLabel(tr("新建文件"), headerWidget);
     titleLabel->setStyleSheet(
-        "QLabel {"
-        "  font-size: 28px;"
-        "  font-weight: bold;"
-        "  color: white;"
-        "}");
+        QString(
+            "QLabel {"
+            "  font-size: 24px;"
+            "  font-weight: 700;"
+            "  color: %1;"
+            "  background: transparent;"
+            "  border: none;"
+            "}")
+            .arg(titleColor));
 
     QLabel *subtitleLabel = new QLabel(tr("选择要创建的文件类型"), headerWidget);
     subtitleLabel->setStyleSheet(
-        "QLabel {"
-        "  font-size: 14px;"
-        "  color: rgba(255, 255, 255, 0.9);"
-        "}");
+        QString(
+            "QLabel {"
+            "  font-size: 13px;"
+            "  color: %1;"
+            "  background: transparent;"
+            "  border: none;"
+            "}")
+            .arg(secondaryColor));
 
     headerLayout->addWidget(titleLabel);
     headerLayout->addWidget(subtitleLabel);
-    headerLayout->addStretch();
-
     mainLayout->addWidget(headerWidget);
 
     QWidget *contentWidget = new QWidget(this);
-
-    QString contentBg = isDarkTheme ? "#2c3e50" : "#f5f7fa";
-    contentWidget->setStyleSheet(QString("QWidget { background: %1; }").arg(contentBg));
+    contentWidget->setStyleSheet(QString("QWidget { background-color: %1; }").arg(pageBackground));
 
     QVBoxLayout *contentLayout = new QVBoxLayout(contentWidget);
-    contentLayout->setContentsMargins(40, 30, 40, 30);
-    contentLayout->setSpacing(20);
+    contentLayout->setContentsMargins(32, 22, 32, 22);
+    contentLayout->setSpacing(14);
 
     QLabel *hintLabel = new QLabel(tr("请选择一个项目类型："), contentWidget);
-    QString hintColor = isDarkTheme ? "#ecf0f1" : "#2c3e50";
     hintLabel->setStyleSheet(
-        QString("QLabel {"
-                "  font-size: 15px;"
-                "  color: %1;"
-                "  font-weight: 600;"
-                "}")
-            .arg(hintColor));
+        QString(
+            "QLabel {"
+            "  font-size: 14px;"
+            "  color: %1;"
+            "  font-weight: 600;"
+            "  background: transparent;"
+            "}")
+            .arg(titleColor));
     contentLayout->addWidget(hintLabel);
 
-    QHBoxLayout *cardsLayout = new QHBoxLayout();
-    cardsLayout->setSpacing(20);
+    QHBoxLayout *cardsLayout = new QHBoxLayout;
+    cardsLayout->setSpacing(16);
 
     normalCard = createProjectCard(
         tr("普通 C++ 文件"),
         tr("创建标准的 C++ 源代码文件"),
-        "",
+        QString(),
         NormalCpp,
-        QColor("#3498db"),
+        QColor(accentColor),
         isDarkTheme);
     cardsLayout->addWidget(normalCard);
 
     easyxCard = createProjectCard(
         tr("EasyX 图形项目"),
         tr("创建 EasyX 图形程序\n包含图形库头文件和初始化代码"),
-        "",
+        QString(),
         EasyXProject,
-        QColor("#e74c3c"),
+        QColor(isDarkTheme ? "#D98A7E" : isEyeCareTheme ? "#A36D60" : "#C86559"),
         isDarkTheme);
     cardsLayout->addWidget(easyxCard);
 
+    QButtonGroup *cardGroup = new QButtonGroup(this);
+    cardGroup->setExclusive(true);
+    cardGroup->addButton(qobject_cast<QPushButton *>(normalCard));
+    cardGroup->addButton(qobject_cast<QPushButton *>(easyxCard));
+
     contentLayout->addLayout(cardsLayout);
-    contentLayout->addStretch();
 
     QWidget *infoWidget = new QWidget(contentWidget);
-    QString infoBg = isDarkTheme ? "#34495e" : "white";
-    QString infoBorder = isDarkTheme ? "#4a5f7f" : "#e1e8ed";
     infoWidget->setStyleSheet(
-        QString("QWidget {"
-                "  background: %1;"
-                "  border-radius: 8px;"
-                "  border: 1px solid %2;"
-                "}")
-            .arg(infoBg, infoBorder));
+        QString(
+            "QWidget {"
+            "  background-color: %1;"
+            "  border: 1px solid %2;"
+            "  border-radius: 9px;"
+            "}")
+            .arg(surfaceBackground, borderColor));
 
     QVBoxLayout *infoLayout = new QVBoxLayout(infoWidget);
-    infoLayout->setContentsMargins(20, 15, 20, 15);
-    infoLayout->setSpacing(8);
+    infoLayout->setContentsMargins(16, 12, 16, 12);
+    infoLayout->setSpacing(5);
 
     QLabel *infoTitle = new QLabel(tr("提示"), infoWidget);
-    QString infoTitleColor = isDarkTheme ? "#ecf0f1" : "#34495e";
     infoTitle->setStyleSheet(
-        QString("QLabel {"
-                "  font-size: 14px;"
-                "  font-weight: bold;"
-                "  color: %1;"
-                "}")
-            .arg(infoTitleColor));
+        QString(
+            "QLabel {"
+            "  font-size: 13px;"
+            "  font-weight: 700;"
+            "  color: %1;"
+            "  background: transparent;"
+            "  border: none;"
+            "}")
+            .arg(titleColor));
 
     QLabel *infoText = new QLabel(
         tr("普通 C++ 文件：适合编写标准 C++ 程序\n"
            "EasyX 项目：自动配置图形库环境，适合图形编程"),
         infoWidget);
-    QString infoTextColor = isDarkTheme ? "#95a5a6" : "#7f8c8d";
     infoText->setStyleSheet(
-        QString("QLabel {"
-                "  font-size: 13px;"
-                "  color: %1;"
-                "  line-height: 1.6;"
-                "}")
-            .arg(infoTextColor));
+        QString(
+            "QLabel {"
+            "  font-size: 12px;"
+            "  color: %1;"
+            "  background: transparent;"
+            "  border: none;"
+            "}")
+            .arg(secondaryColor));
 
     infoLayout->addWidget(infoTitle);
     infoLayout->addWidget(infoText);
-
     contentLayout->addWidget(infoWidget);
+    contentLayout->addStretch();
 
-    mainLayout->addWidget(contentWidget);
+    mainLayout->addWidget(contentWidget, 1);
 
     QWidget *footerWidget = new QWidget(this);
-    footerWidget->setFixedHeight(70);
-    QString footerBg = isDarkTheme ? "#34495e" : "white";
-    QString footerBorder = isDarkTheme ? "#4a5f7f" : "#e1e8ed";
+    footerWidget->setFixedHeight(68);
     footerWidget->setStyleSheet(
-        QString("QWidget {"
-                "  background: %1;"
-                "  border-top: 1px solid %2;"
-                "}")
-            .arg(footerBg, footerBorder));
+        QString(
+            "QWidget {"
+            "  background-color: %1;"
+            "  border-top: 1px solid %2;"
+            "}")
+            .arg(footerBackground, borderColor));
 
     QHBoxLayout *footerLayout = new QHBoxLayout(footerWidget);
-    footerLayout->setContentsMargins(40, 15, 40, 15);
+    footerLayout->setContentsMargins(32, 13, 32, 13);
+    footerLayout->setSpacing(10);
     footerLayout->addStretch();
 
     cancelBtn = new QPushButton(tr("取消"), footerWidget);
-    cancelBtn->setFixedSize(120, 40);
+    cancelBtn->setFixedSize(112, 40);
     cancelBtn->setCursor(Qt::PointingHandCursor);
-
-    QString cancelBg = isDarkTheme ? "#7f8c8d" : "#ecf0f1";
-    QString cancelHover = isDarkTheme ? "#95a5a6" : "#d5dbdb";
-    QString cancelPressed = isDarkTheme ? "#6c7a7b" : "#bdc3c7";
-    QString cancelColor = isDarkTheme ? "white" : "#2c3e50";
-
     cancelBtn->setStyleSheet(
-        QString("QPushButton {"
-                "  background-color: %1;"
-                "  color: %2;"
-                "  border: none;"
-                "  border-radius: 6px;"
-                "  font-size: 14px;"
-                "  font-weight: 600;"
-                "}"
-                "QPushButton:hover {"
-                "  background-color: %3;"
-                "}"
-                "QPushButton:pressed {"
-                "  background-color: %4;"
-                "}")
-            .arg(cancelBg, cancelColor, cancelHover, cancelPressed));
+        QString(
+            "QPushButton {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  border: 1px solid %3;"
+            "  border-radius: 7px;"
+            "  font-size: 14px;"
+            "  font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "  border-color: %4;"
+            "}"
+            "QPushButton:pressed {"
+            "  background-color: %5;"
+            "}")
+            .arg(surfaceBackground,
+                 titleColor,
+                 borderColor,
+                 accentColor,
+                 footerBackground));
 
     createBtn = new QPushButton(tr("创建文件"), footerWidget);
-    createBtn->setFixedSize(120, 40);
+    createBtn->setFixedSize(112, 40);
     createBtn->setCursor(Qt::PointingHandCursor);
     createBtn->setEnabled(false);
     createBtn->setStyleSheet(
-        "QPushButton {"
-        "  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-        "              stop:0 #667eea, stop:1 #764ba2);"
-        "  color: white;"
-        "  border: none;"
-        "  border-radius: 6px;"
-        "  font-size: 14px;"
-        "  font-weight: 600;"
-        "}"
-        "QPushButton:hover {"
-        "  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-        "              stop:0 #5568d3, stop:1 #6a3f8f);"
-        "}"
-        "QPushButton:pressed {"
-        "  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-        "              stop:0 #4a5bc4, stop:1 #5d3680);"
-        "}"
-        "QPushButton:disabled {"
-        "  background: #bdc3c7;"
-        "  color: #7f8c8d;"
-        "}");
+        QString(
+            "QPushButton {"
+            "  background-color: %1;"
+            "  color: white;"
+            "  border: 1px solid %1;"
+            "  border-radius: 7px;"
+            "  font-size: 14px;"
+            "  font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "  background-color: %2;"
+            "  border-color: %2;"
+            "}"
+            "QPushButton:pressed {"
+            "  background-color: %3;"
+            "  border-color: %3;"
+            "}"
+            "QPushButton:disabled {"
+            "  background-color: %4;"
+            "  border-color: %4;"
+            "  color: %5;"
+            "}")
+            .arg(accentColor,
+                 QColor(accentColor).lighter(108).name(),
+                 QColor(accentColor).darker(112).name(),
+                 isDarkTheme ? "#46515E" : isEyeCareTheme ? "#D6CBA8" : "#D8E0EA",
+                 isDarkTheme ? "#8E99A6" : isEyeCareTheme ? "#8A826E" : "#8A96A5"));
 
     footerLayout->addWidget(cancelBtn);
     footerLayout->addWidget(createBtn);
-
     mainLayout->addWidget(footerWidget);
 
     connect(cancelBtn, &QPushButton::clicked, this, &NewFileDialog::onCancelClicked);
@@ -5376,84 +5811,90 @@ QWidget *NewFileDialog::createProjectCard(const QString &title, const QString &d
                                           const QColor &accentColor, bool isDarkTheme)
 {
     QPushButton *card = new QPushButton(this);
-    card->setFixedSize(280, 200);
+    card->setMinimumHeight(148);
+    card->setMaximumHeight(148);
+    card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     card->setCursor(Qt::PointingHandCursor);
+    card->setFocusPolicy(Qt::NoFocus);
     card->setProperty("fileType", QVariant::fromValue(type));
-    card->setProperty("accentColor", accentColor);
-    card->setProperty("isDarkTheme", isDarkTheme);
     card->setCheckable(true);
     card->setAutoExclusive(false);
+    card->setText(QString());
+    card->setAccessibleName(title);
+    card->setAccessibleDescription(description);
 
-    QString cardBg = isDarkTheme ? "#34495e" : "white";
-    QString cardBorder = isDarkTheme ? "#4a5f7f" : "#e1e8ed";
-    QString cardHoverBg = isDarkTheme ? "#3d566e" : "#fafbfc";
+    Q_UNUSED(iconText);
+
+    const QString cardBackground = isDarkTheme ? "#2D3540" : isEyeCareTheme ? "#FFF9E8" : "#FFFFFF";
+    const QString hoverBackground = isDarkTheme ? "#333D49" : isEyeCareTheme ? "#FAF0D5" : "#F7F9FC";
+    const QString selectedBackground = isDarkTheme ? "#344151" : isEyeCareTheme ? "#F5E9C8" : "#F1F5FB";
+    const QString borderColor = isDarkTheme ? "#46515E" : isEyeCareTheme ? "#C9BC91" : "#D8E0EA";
+    const QString titleColor = isDarkTheme ? "#F2F5F8" : isEyeCareTheme ? "#35362E" : "#243244";
+    const QString descriptionColor = isDarkTheme ? "#AEB8C4" : isEyeCareTheme ? "#6B6658" : "#6E7B8B";
 
     card->setStyleSheet(
-        QString("QPushButton {"
-                "  background: %1;"
-                "  border: 2px solid %2;"
-                "  border-radius: 12px;"
-                "  text-align: left;"
-                "  padding: 0px;"
-                "}"
-                "QPushButton:hover {"
-                "  border-color: %3;"
-                "  background: %4;"
-                "}"
-                "QPushButton:checked {"
-                "  background: %5;"
-                "  border: 3px solid %3;"
-                "}")
-            .arg(cardBg, cardBorder, accentColor.name(),
-                 cardHoverBg, accentColor.lighter(isDarkTheme ? 150 : 195).name()));
+        QString(
+            "QPushButton {"
+            "  background-color: %1;"
+            "  border: 1px solid %2;"
+            "  border-radius: 12px;"
+            "  padding: 0px;"
+            "  outline: none;"
+            "}"
+            "QPushButton:hover {"
+            "  background-color: %3;"
+            "  border-color: %4;"
+            "}"
+            "QPushButton:checked {"
+            "  background-color: %5;"
+            "  border: 2px solid %4;"
+            "}"
+            "QPushButton:checked:hover {"
+            "  background-color: %5;"
+            "  border: 2px solid %4;"
+            "}")
+            .arg(cardBackground,
+                 borderColor,
+                 hoverBackground,
+                 accentColor.name(),
+                 selectedBackground));
 
     QWidget *contentWidget = new QWidget(card);
     contentWidget->setStyleSheet("background: transparent; border: none;");
     contentWidget->setAttribute(Qt::WA_TransparentForMouseEvents);
 
     QVBoxLayout *cardLayout = new QVBoxLayout(contentWidget);
-    cardLayout->setContentsMargins(20, 20, 20, 20);
-    cardLayout->setSpacing(12);
-
-    QLabel *iconLabel = new QLabel(iconText, contentWidget);
-    iconLabel->setAlignment(Qt::AlignCenter);
-    iconLabel->setStyleSheet(
-        "QLabel {"
-        "  font-size: 48px;"
-        "  background: transparent;"
-        "  border: none;"
-        "}");
-    iconLabel->setFixedHeight(60);
+    cardLayout->setContentsMargins(22, 20, 22, 20);
+    cardLayout->setSpacing(9);
+    cardLayout->addStretch();
 
     QLabel *titleLabel = new QLabel(title, contentWidget);
     titleLabel->setAlignment(Qt::AlignCenter);
     titleLabel->setWordWrap(true);
-    QString titleColor = isDarkTheme ? "#ecf0f1" : "#2c3e50";
     titleLabel->setStyleSheet(
-        QString("QLabel {"
-                "  font-size: 16px;"
-                "  font-weight: bold;"
-                "  color: %1;"
-                "  background: transparent;"
-                "  border: none;"
-                "}")
+        QString(
+            "QLabel {"
+            "  color: %1;"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-size: 17px;"
+            "  font-weight: 700;"
+            "}")
             .arg(titleColor));
 
     QLabel *descLabel = new QLabel(description, contentWidget);
     descLabel->setAlignment(Qt::AlignCenter);
     descLabel->setWordWrap(true);
-    QString descColor = isDarkTheme ? "#95a5a6" : "#7f8c8d";
     descLabel->setStyleSheet(
-        QString("QLabel {"
-                "  font-size: 12px;"
-                "  color: %1;"
-                "  line-height: 1.5;"
-                "  background: transparent;"
-                "  border: none;"
-                "}")
-            .arg(descColor));
+        QString(
+            "QLabel {"
+            "  color: %1;"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-size: 12px;"
+            "}")
+            .arg(descriptionColor));
 
-    cardLayout->addWidget(iconLabel);
     cardLayout->addWidget(titleLabel);
     cardLayout->addWidget(descLabel);
     cardLayout->addStretch();
@@ -5472,31 +5913,10 @@ QWidget *NewFileDialog::createProjectCard(const QString &title, const QString &d
 
 void NewFileDialog::updateCardSelection(QWidget *card)
 {
-    if (normalCard)
+    QPushButton *button = qobject_cast<QPushButton *>(card);
+    if (button)
     {
-        QPushButton *btn = qobject_cast<QPushButton *>(normalCard);
-        if (btn)
-        {
-            btn->setChecked(false);
-        }
-    }
-
-    if (easyxCard)
-    {
-        QPushButton *btn = qobject_cast<QPushButton *>(easyxCard);
-        if (btn)
-        {
-            btn->setChecked(false);
-        }
-    }
-
-    if (card)
-    {
-        QPushButton *btn = qobject_cast<QPushButton *>(card);
-        if (btn)
-        {
-            btn->setChecked(true);
-        }
+        button->setChecked(true);
     }
 }
 
@@ -8489,7 +8909,7 @@ body {
     margin: 0;
     padding: 0;
     overflow: hidden;
-    background: #0c0c0c;
+    background: #111418;
 }
 
 body {
@@ -8503,7 +8923,7 @@ body {
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-    background: #0c0c0c;
+    background: #111418;
 }
 
 #terminal .xterm {
@@ -8513,7 +8933,7 @@ body {
 
 #terminal .xterm-viewport {
     overflow-y: auto !important;
-    background-color: #0c0c0c;
+    background-color: #111418;
 }
 
 #terminal .xterm-screen {
@@ -8565,7 +8985,7 @@ body {
 
     const themes = {
         dark: {
-            background: '#0c0c0c', foreground: '#cccccc', cursor: '#ffffff',
+            background: '#111418', foreground: '#cccccc', cursor: '#ffffff',
             selectionBackground: '#ffffff', selectionForeground: '#000000',
             black: '#000000', red: '#cd3131', green: '#0dbc79', yellow: '#e5e510',
             blue: '#2472c8', magenta: '#bc3fbc', cyan: '#11a8cd', white: '#e5e5e5',
@@ -8573,8 +8993,17 @@ body {
             brightYellow: '#f5f543', brightBlue: '#3b8eea', brightMagenta: '#d670d6',
             brightCyan: '#29b8db', brightWhite: '#ffffff'
         },
+        eyeCare: {
+            background: '#F6EBCB', foreground: '#3B3A32', cursor: '#3B3A32',
+            selectionBackground: '#B8D7A3', selectionForeground: '#26301F',
+            black: '#2F3528', red: '#A33A3A', green: '#4F7A45', yellow: '#8A6D2F',
+            blue: '#356B8C', magenta: '#8A4F78', cyan: '#3F7C78', white: '#6B6658',
+            brightBlack: '#746F61', brightRed: '#C14F4F', brightGreen: '#5E8E51',
+            brightYellow: '#9A7B35', brightBlue: '#477F9F', brightMagenta: '#9A6088',
+            brightCyan: '#4D8E88', brightWhite: '#3B3A32'
+        },
         light: {
-            background: '#ffffff', foreground: '#111111', cursor: '#111111',
+            background: '#F6F8FA', foreground: '#111111', cursor: '#111111',
             selectionBackground: '#add6ff', selectionForeground: '#000000',
             black: '#000000', red: '#a31515', green: '#008000', yellow: '#795e26',
             blue: '#0451a5', magenta: '#af00db', cyan: '#0598bc',
@@ -8687,10 +9116,12 @@ body {
         }, 80);
     }
 
-    function applyTheme(dark)
+    function applyTheme(mode)
     {
-        darkTheme = !!dark;
-        const theme = darkTheme ? themes.dark : themes.light;
+        const numericMode = Number(mode);
+        darkTheme = numericMode === 2;
+        const eyeCareTheme = numericMode === 1;
+        const theme = darkTheme ? themes.dark : eyeCareTheme ? themes.eyeCare : themes.light;
         document.body.style.background = theme.background;
         document.getElementById('terminal').style.background = theme.background;
         if (term)
@@ -8707,9 +9138,9 @@ body {
             styleEl.id = styleId;
             document.head.appendChild(styleEl);
         }
-        const trackColor = darkTheme ? '#1e1e1e' : '#e0e0e0';
-        const thumbColor = darkTheme ? '#555' : '#aaa';
-        const thumbHoverColor = darkTheme ? '#777' : '#888';
+        const trackColor = darkTheme ? '#1e1e1e' : eyeCareTheme ? '#E7D9AE' : '#e0e0e0';
+        const thumbColor = darkTheme ? '#555' : eyeCareTheme ? '#B19F70' : '#aaa';
+        const thumbHoverColor = darkTheme ? '#777' : eyeCareTheme ? '#927F53' : '#888';
         const viewportBg = theme.background;
         styleEl.textContent = `
             #terminal .xterm-viewport {
@@ -8727,7 +9158,8 @@ body {
         `;
     }
 
-    function clearTerminal()
+)HTML")
+        + QString::fromUtf8(R"HTML(    function clearTerminal()
     {
         if (!term)
         {
@@ -9014,7 +9446,7 @@ public:
 
     void executeCommand(const QString &command);
     void setWorkingDirectory(const QString &dir);
-    void setTheme(bool dark);
+    void setTheme(ThemeMode mode);
     void clear();
 
 protected:
@@ -9038,7 +9470,7 @@ private:
     PowerShellPty *pty = nullptr;
 
     QString currentDir;
-    bool darkTheme = true;
+    ThemeMode themeMode = ThemeMode::Dark;
     bool terminalLoaded = false;
     bool ptyStarted = false;
 
@@ -9073,7 +9505,7 @@ IntegratedTerminal::IntegratedTerminal(QWidget *parent)
 
     QWidget *container = new QWidget(this);
     QVBoxLayout *layout = new QVBoxLayout(container);
-    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setContentsMargins(6, 6, 6, 6);
     layout->setSpacing(0);
 
     view = new QWebEngineView(container);
@@ -9125,7 +9557,7 @@ IntegratedTerminal::IntegratedTerminal(QWidget *parent)
                 qWarning().noquote() << "[IntegratedTerminal]" << message;
             });
 
-    setTheme(true);
+    setTheme(ThemeMode::Dark);
     loadHistory();
     initCompleter();
     startProcess();
@@ -9213,12 +9645,28 @@ void IntegratedTerminal::setWorkingDirectory(const QString &dir)
     }
 }
 
-void IntegratedTerminal::setTheme(bool dark)
+void IntegratedTerminal::setTheme(ThemeMode mode)
 {
-    darkTheme = dark;
+    themeMode = mode;
 
-    const QString bg = darkTheme ? QStringLiteral("#0c0c0c") : QStringLiteral("#ffffff");
-    view->setStyleSheet(QStringLiteral("QWebEngineView { background: %1; border: none; }").arg(bg));
+    const QString backgroundColor = themeMode == ThemeMode::Dark
+                                        ? QStringLiteral("#111418")
+                                        : themeMode == ThemeMode::EyeCare
+                                              ? QStringLiteral("#F6EBCB")
+                                              : QStringLiteral("#F6F8FA");
+    const QString borderColor = themeMode == ThemeMode::Dark
+                                    ? QStringLiteral("#4A4F57")
+                                    : themeMode == ThemeMode::EyeCare
+                                          ? QStringLiteral("#B9AA7D")
+                                          : QStringLiteral("#C8D0DA");
+    view->setStyleSheet(
+        QStringLiteral(
+            "QWebEngineView {"
+            "    background-color: %1;"
+            "    border: 1px solid %2;"
+            "    border-radius: 6px;"
+            "}")
+            .arg(backgroundColor, borderColor));
 
     applyThemeToWebView();
 }
@@ -9416,7 +9864,7 @@ void IntegratedTerminal::applyThemeToWebView()
 
     runTerminalScript(
         QStringLiteral("window.CompilerTerminalApplyTheme && window.CompilerTerminalApplyTheme(%1);")
-            .arg(darkTheme ? QStringLiteral("true") : QStringLiteral("false")));
+            .arg(static_cast<int>(themeMode)));
 }
 
 // 代码片段
@@ -11600,10 +12048,13 @@ void SideBarContainer::setDarkTheme(bool dark)
 {
     currentThemeIsDark = dark;
 
-    QString bgColor = dark ? "#252526" : "#F3F3F3";
-    QString borderColor = dark ? "#3C3C3C" : "#DDDDDD";
-    QString textColor = dark ? "#CCCCCC" : "#333333";
-    QString activeColor = dark ? "#37373D" : "#FFFFFF";
+    const QWidget *rootWindow = window();
+    const bool eyeCare = !dark && rootWindow &&
+                         rootWindow->property("themeMode").toInt() == static_cast<int>(ThemeMode::EyeCare);
+    QString bgColor = dark ? "#252526" : eyeCare ? "#F3E8C8" : "#F3F3F3";
+    QString borderColor = dark ? "#3C3C3C" : eyeCare ? "#C7B98E" : "#DDDDDD";
+    QString textColor = dark ? "#CCCCCC" : eyeCare ? "#3B3A32" : "#333333";
+    QString activeColor = dark ? "#37373D" : eyeCare ? "#E5D9B7" : "#FFFFFF";
 
     this->setStyleSheet(QString(
                             "QWidget#SideBarRoot { background-color: %1; border-right: 1px solid %2; }"
@@ -11846,17 +12297,19 @@ QString difficultyToString(int diff)
     case 1:
         return QObject::tr("入门");
     case 2:
-        return QObject::tr("普及-");
+        return QObject::tr("普及−");
     case 3:
-        return QObject::tr("普及/提高-");
+        return QObject::tr("普及");
     case 4:
-        return QObject::tr("普及+/提高");
+        return QObject::tr("普及+/提高−");
     case 5:
-        return QObject::tr("提高+/省选-");
+        return QObject::tr("提高");
     case 6:
-        return QObject::tr("省选/NOI-");
+        return QObject::tr("提高+/省选−");
     case 7:
-        return QObject::tr("NOI/NOI+/CTSC");
+        return QObject::tr("省选/NOI−");
+    case 8:
+        return QObject::tr("NOI/NOI+/CTS");
     default:
         return QObject::tr("未知");
     }
@@ -12321,31 +12774,38 @@ QString buildProblemHtml(const QString &fullTitle,
 
     auto getDifficultyColor = [](const QString &diff) -> QString
     {
-        if (diff.contains("入门"))
+        QString d = diff.trimmed();
+        d.replace(QChar('-'), QChar(0x2212));
+
+        if (d == "入门")
         {
             return "#FE4C61";
         }
-        if (diff.contains("普及-"))
+        if (d == "普及−")
         {
             return "#F39C11";
         }
-        if (diff.contains("普及/提高-"))
+        if (d == "普及")
         {
             return "#FFC116";
         }
-        if (diff.contains("普及+/提高"))
+        if (d == "普及+/提高−")
         {
             return "#52C41A";
         }
-        if (diff.contains("提高+/省选-"))
+        if (d == "提高")
+        {
+            return "#13C2C2";
+        }
+        if (d == "提高+/省选−")
         {
             return "#3498DB";
         }
-        if (diff.contains("省选/NOI-"))
+        if (d == "省选/NOI−")
         {
             return "#9D3DCF";
         }
-        if (diff.contains("NOI/NOI+/CTSC"))
+        if (d == "NOI/NOI+/CTS")
         {
             return "#0E1D69";
         }
@@ -13161,6 +13621,7 @@ private:
 
     QSpinBox *groupCountSpin;
     QSpinBox *timeLimitSpin;
+    QSpinBox *processCountSpin = nullptr;
 
     QPushButton *startBtn;
     QPushButton *stopBtn;
@@ -13194,6 +13655,7 @@ private:
     QProcess *solProcess;
     QTimer *timer;
     QElapsedTimer *stageTimer;
+    QElapsedTimer processTimer;
     int currentTimeMs;
 
     enum State
@@ -13210,7 +13672,33 @@ private:
     int totalGroups;
     int currentGroup;
     int timeLimitMs;
+    int parallelProcessCount;
+    int nextParallelGroup;
+    int completedParallelGroups;
     bool stopRequested;
+    bool parallelMode;
+    bool parallelFailed;
+
+    struct ParallelTask
+    {
+        enum Stage
+        {
+            Generating,
+            RunningStandard,
+            RunningSolution
+        } stage = Generating;
+
+        int groupIndex = 0;
+        bool finished = false;
+        QProcess *process = nullptr;
+        QTimer *timer = nullptr;
+        QElapsedTimer executionTimer;
+        QString input;
+        QString standardOutput;
+        QString solutionOutput;
+    };
+
+    QList<ParallelTask *> parallelTasks;
 
     QString stdExePath;
     QString solExePath;
@@ -13237,6 +13725,20 @@ private:
     void compareOutputs();
     void showWAInfo();
     void cleanUpTempFiles();
+    int safeParallelProcessLimit() const;
+    void startParallelRun();
+    void launchParallelTask();
+    void startParallelData(ParallelTask *task);
+    void startParallelStandard(ParallelTask *task);
+    void startParallelSolution(ParallelTask *task);
+    bool synchronizeFinishedProcess(QProcess *process) const;
+    int timeoutConfirmationDelay() const;
+    void handleParallelTimeout(ParallelTask *task, const QString &status, const QString &detail);
+    void completeParallelTask(ParallelTask *task);
+    void failParallelTask(ParallelTask *task, const QString &status, const QString &detail);
+    void destroyParallelTask(ParallelTask *task);
+    void stopParallelTasks();
+    void updateParallelProgress();
 };
 
 // IDE 核心
@@ -13274,6 +13776,7 @@ public:
         return optimizationLevel;
     }
     void showFloatingMessage(const QString &message, int duration = 3000, bool isError = false);
+    void refreshRecentFiles();
 
 public slots:
     void checkForUpdates();
@@ -13338,6 +13841,7 @@ private:
     bool codeFolding;
     bool lineNumbers;
     bool darkTheme;
+    ThemeMode themeMode;
     QMenu *fileMenu = nullptr;
     QMenu *editMenu = nullptr;
     QMenu *buildMenu = nullptr;
@@ -13510,6 +14014,12 @@ private:
     QTextCharFormat successFormat;
     QTextCharFormat errorFormat;
     QMap<CodeEditor *, QString> editorEncodings;
+    QFileSystemWatcher *fileSystemWatcher = nullptr;
+    QMap<QString, qint64> watchedFileModifiedTimes;
+    QMap<QString, qint64> watchedFileSizes;
+    QMap<QString, QByteArray> watchedFileHashes;
+    QSet<QString> pendingExternalFileChecks;
+    QSet<QString> activeExternalFilePrompts;
     QDockWidget *sampleTesterDock = nullptr;
     QWidget *sampleTesterWidget = nullptr;
     QVBoxLayout *testCasesLayout = nullptr;
@@ -13579,11 +14089,16 @@ private:
     QStringList detectMinGWIncludePaths(const QString &compilerPath);
     bool isCompilerValid(const QString &path);
     QString getTempFilePathForNewEditor(CodeEditor *editor);
+    QString normalizedWatchPath(const QString &filePath) const;
+    int findEditorByFilePath(const QString &filePath) const;
+    void watchOpenedFile(const QString &filePath);
+    void unwatchFileIfUnused(const QString &filePath, CodeEditor *excludedEditor = nullptr);
+    bool reloadEditorFromDisk(CodeEditor *editor, const QString &filePath);
 
     void addToRecentFiles(const QString &filePath);
     void loadRecentFiles();
     void saveRecentFiles();
-    void setTheme(bool dark);
+    void setTheme(ThemeMode mode);
     void warmupAndRunTest();
     void createCompetitionDock();
     void updateTimerDisplay();
@@ -13739,11 +14254,27 @@ private:
     }
     QColor getSuccessColor() const
     {
-        return darkTheme ? QColor(0, 255, 255) : QColor(0, 150, 0);
+        if (darkTheme)
+        {
+            return QColor(0, 255, 255);
+        }
+        if (themeMode == ThemeMode::EyeCare)
+        {
+            return QColor("#477A3D");
+        }
+        return QColor(0, 150, 0);
     }
     QColor getFailColor() const
     {
-        return darkTheme ? QColor(255, 50, 50) : QColor(200, 0, 0);
+        if (darkTheme)
+        {
+            return QColor(255, 50, 50);
+        }
+        if (themeMode == ThemeMode::EyeCare)
+        {
+            return QColor("#A23B32");
+        }
+        return QColor(200, 0, 0);
     }
     void resetOutputFormat()
     {
@@ -13753,11 +14284,16 @@ private:
         {
             format.setForeground(QColor(220, 220, 220));
         }
+        else if (themeMode == ThemeMode::EyeCare)
+        {
+            format.setForeground(QColor("#3B3A32"));
+        }
         else
         {
             format.setForeground(Qt::black);
         }
         cursor.setCharFormat(format);
+        outputEdit->setTextCursor(cursor);
     }
     void createSampleTesterDock();
 
@@ -13798,9 +14334,24 @@ private:
     void setTestCaseCollapsed(int index, bool collapsed);
     void initTextFormats()
     {
-        defaultFormat.setForeground(darkTheme ? QColor(220, 220, 220) : Qt::black);
-        successFormat.setForeground(darkTheme ? QColor(0, 255, 255) : QColor(0, 150, 0));
-        errorFormat.setForeground(darkTheme ? QColor(255, 50, 50) : QColor(200, 0, 0));
+        if (darkTheme)
+        {
+            defaultFormat.setForeground(QColor(220, 220, 220));
+            successFormat.setForeground(QColor(0, 255, 255));
+            errorFormat.setForeground(QColor(255, 50, 50));
+        }
+        else if (themeMode == ThemeMode::EyeCare)
+        {
+            defaultFormat.setForeground(QColor("#3B3A32"));
+            successFormat.setForeground(QColor("#477A3D"));
+            errorFormat.setForeground(QColor("#A23B32"));
+        }
+        else
+        {
+            defaultFormat.setForeground(Qt::black);
+            successFormat.setForeground(QColor(0, 150, 0));
+            errorFormat.setForeground(QColor(200, 0, 0));
+        }
     }
     void appendColoredTextNoNewline(const QString &text, const QTextCharFormat &format)
     {
@@ -13848,11 +14399,12 @@ private slots:
     void updateStatusBar();
     void changeCppStandard(int index);
     void showSettings();
-    void applySettings(const QString &compilerPath, bool autoBrackets, bool autoQuotes, bool autoIndent, int indentSize, bool lineNumbers, bool darkTheme, bool codeCompletion, const QFont &editorFont);
+    void applySettings(const QString &compilerPath, bool autoBrackets, bool autoQuotes, bool autoIndent, int indentSize, bool lineNumbers, ThemeMode themeMode, bool codeCompletion, const QFont &editorFont);
     void toggleComment();
     void runProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void readRunOutput();
     void onFileSelected(const QString &filePath);
+    void onWatchedFileChanged(const QString &filePath);
     void closeTab(int index);
     void currentTabChanged(int index);
     void find();
@@ -13956,7 +14508,7 @@ CompilerIDE::CompilerIDE()
     : compileProcess(nullptr), runProcess(nullptr),
       cppStandard("c++17"), autoBrackets(true), autoQuotes(true),
       autoIndent(true), indentSize(4), lineNumbers(true),
-      darkTheme(true), debugger(nullptr), codeCompleter(nullptr),
+      darkTheme(true), themeMode(ThemeMode::Dark), debugger(nullptr), codeCompleter(nullptr),
       terminal(nullptr), snippetManager(nullptr), diagnosticsTimer(nullptr), maxHistoryPoints(60), initialUptime(0), isNewCompilation(false), errorTableWidget(nullptr), isCheckingForUpdates(false), isDebugging(false),
       currentDebugState(DebugState_Idle),
       debugDock(nullptr),
@@ -13983,6 +14535,7 @@ CompilerIDE::CompilerIDE()
       untitledCounter(1)
 {
     QApplication::setStyle(new ModernStyle);
+    qApp->installEventFilter(this);
 
     setWindowIcon(QIcon(":/icons/CompilerIDE_logo.png"));
 
@@ -13998,6 +14551,10 @@ CompilerIDE::CompilerIDE()
 
     connect(tabWidget, &QTabWidget::tabCloseRequested, this, &CompilerIDE::closeTab);
     connect(tabWidget, &QTabWidget::currentChanged, this, &CompilerIDE::currentTabChanged);
+
+    fileSystemWatcher = new QFileSystemWatcher(this);
+    connect(fileSystemWatcher, &QFileSystemWatcher::fileChanged,
+            this, &CompilerIDE::onWatchedFileChanged);
 
     createDiagnosticsDock();
     createDebugDock();
@@ -14039,7 +14596,7 @@ CompilerIDE::CompilerIDE()
 
     initTextFormats();
 
-    setTheme(darkTheme);
+    setTheme(themeMode);
 
     compilerType = detectCompilerType(compilerPath);
 
@@ -14412,6 +14969,7 @@ CompilerIDE::CompilerIDE()
 
 CompilerIDE::~CompilerIDE()
 {
+    qApp->removeEventFilter(this);
     stopCompetitiveCompanionServer();
     if (compileProcess)
     {
@@ -14485,9 +15043,14 @@ CompilerIDE::~CompilerIDE()
     delete snippetManager;
 }
 
-void CompilerIDE::setTheme(bool dark)
+void CompilerIDE::setTheme(ThemeMode mode)
 {
-    this->darkTheme = dark;
+    themeMode = mode;
+    darkTheme = mode == ThemeMode::Dark;
+
+    const bool dark = mode == ThemeMode::Dark;
+    const bool eyeCare = mode == ThemeMode::EyeCare;
+
     initTextFormats();
 
     if (dark)
@@ -14513,6 +15076,7 @@ void CompilerIDE::setTheme(bool dark)
         outputPalette.setColor(QPalette::Base, QColor(25, 25, 25));
         outputPalette.setColor(QPalette::Text, QColor(220, 220, 220));
         outputEdit->setPalette(outputPalette);
+        outputEdit->viewport()->setPalette(outputPalette);
 
         if (errorTableWidget)
         {
@@ -14521,6 +15085,8 @@ void CompilerIDE::setTheme(bool dark)
             tablePalette.setColor(QPalette::Text, QColor(220, 220, 220));
             tablePalette.setColor(QPalette::AlternateBase, QColor(35, 35, 35));
             errorTableWidget->setPalette(tablePalette);
+            errorTableWidget->viewport()->update();
+            errorTableWidget->horizontalHeader()->viewport()->update();
 
             errorTableWidget->horizontalHeader()->setStyleSheet(
                 "QHeaderView::section {"
@@ -14624,15 +15190,33 @@ void CompilerIDE::setTheme(bool dark)
         if (cpuChart)
         {
             cpuChart->setTheme(QChart::ChartThemeDark);
+            cpuChart->setBackgroundBrush(QColor("#252526"));
+            cpuChart->setPlotAreaBackgroundBrush(Qt::NoBrush);
+            cpuChart->setPlotAreaBackgroundVisible(false);
+            cpuChart->update();
         }
         if (memoryChart)
         {
             memoryChart->setTheme(QChart::ChartThemeDark);
+            memoryChart->setBackgroundBrush(QColor("#252526"));
+            memoryChart->setPlotAreaBackgroundBrush(Qt::NoBrush);
+            memoryChart->setPlotAreaBackgroundVisible(false);
+            memoryChart->update();
+        }
+        if (cpuChartView)
+        {
+            cpuChartView->setStyleSheet(QString());
+            cpuChartView->viewport()->update();
+        }
+        if (memoryChartView)
+        {
+            memoryChartView->setStyleSheet(QString());
+            memoryChartView->viewport()->update();
         }
 
         if (terminal)
         {
-            terminal->setTheme(true);
+            terminal->setTheme(mode);
         }
 
         if (timerLabel)
@@ -14650,10 +15234,33 @@ void CompilerIDE::setTheme(bool dark)
     {
         QApplication::setPalette(style()->standardPalette());
 
+        if (eyeCare)
+        {
+            QPalette eyeCarePalette = style()->standardPalette();
+            eyeCarePalette.setColor(QPalette::Window, QColor("#FDF6E3"));
+            eyeCarePalette.setColor(QPalette::Base, QColor("#FDF6E3"));
+            eyeCarePalette.setColor(QPalette::AlternateBase, QColor("#F5EEDB"));
+            eyeCarePalette.setColor(QPalette::Button, QColor("#F5EEDB"));
+            eyeCarePalette.setColor(QPalette::Text, QColor("#3B3A32"));
+            eyeCarePalette.setColor(QPalette::WindowText, QColor("#3B3A32"));
+            eyeCarePalette.setColor(QPalette::ButtonText, QColor("#3B3A32"));
+            eyeCarePalette.setColor(QPalette::ToolTipBase, QColor("#FDF6E3"));
+            eyeCarePalette.setColor(QPalette::ToolTipText, QColor("#3B3A32"));
+            eyeCarePalette.setColor(QPalette::Highlight, QColor("#93B77D"));
+            eyeCarePalette.setColor(QPalette::HighlightedText, Qt::white);
+            QApplication::setPalette(eyeCarePalette);
+        }
+
         QPalette outputPalette = outputEdit->palette();
         outputPalette.setColor(QPalette::Base, Qt::white);
         outputPalette.setColor(QPalette::Text, Qt::black);
+        if (eyeCare)
+        {
+            outputPalette.setColor(QPalette::Base, QColor("#FDF6E3"));
+            outputPalette.setColor(QPalette::Text, QColor("#3B3A32"));
+        }
         outputEdit->setPalette(outputPalette);
+        outputEdit->viewport()->setPalette(outputPalette);
 
         if (errorTableWidget)
         {
@@ -14661,7 +15268,15 @@ void CompilerIDE::setTheme(bool dark)
             tablePalette.setColor(QPalette::Base, Qt::white);
             tablePalette.setColor(QPalette::Text, Qt::black);
             tablePalette.setColor(QPalette::AlternateBase, QColor(240, 240, 240));
+            if (eyeCare)
+            {
+                tablePalette.setColor(QPalette::Base, QColor("#FDF6E3"));
+                tablePalette.setColor(QPalette::Text, QColor("#3B3A32"));
+                tablePalette.setColor(QPalette::AlternateBase, QColor("#F3E8C8"));
+            }
             errorTableWidget->setPalette(tablePalette);
+            errorTableWidget->viewport()->update();
+            errorTableWidget->horizontalHeader()->viewport()->update();
 
             errorTableWidget->horizontalHeader()->setStyleSheet(
                 "QHeaderView::section {"
@@ -14670,6 +15285,16 @@ void CompilerIDE::setTheme(bool dark)
                 "    padding: 4px;"
                 "    border: 1px solid #CCCCCC;"
                 "}");
+            if (eyeCare)
+            {
+                errorTableWidget->horizontalHeader()->setStyleSheet(
+                    "QHeaderView::section {"
+                    "    background-color: #E5D9B7;"
+                    "    color: #3B3A32;"
+                    "    padding: 4px;"
+                    "    border: 1px solid #B9AA7D;"
+                    "}");
+            }
         }
 
         if (debugOutput)
@@ -14680,6 +15305,15 @@ void CompilerIDE::setTheme(bool dark)
                 "    color: black;"
                 "    border: 1px solid #CCCCCC;"
                 "}");
+            if (eyeCare)
+            {
+                debugOutput->setStyleSheet(
+                    "QTextBrowser {"
+                    "    background-color: #FDF6E3;"
+                    "    color: #3B3A32;"
+                    "    border: 1px solid #B9AA7D;"
+                    "}");
+            }
         }
 
         if (breakpointsTable)
@@ -14700,6 +15334,13 @@ void CompilerIDE::setTheme(bool dark)
                 "    padding: 4px;"
                 "    border: 1px solid #CCCCCC;"
                 "}");
+            if (eyeCare)
+            {
+                breakpointsTable->setStyleSheet(
+                    "QTableWidget { background-color: #FDF6E3; color: #3B3A32; gridline-color: #C7B98E; }"
+                    "QTableWidget::item:selected { background-color: #7F9E68; color: white; }"
+                    "QHeaderView::section { background-color: #E5D9B7; color: #3B3A32; padding: 4px; border: 1px solid #B9AA7D; }");
+            }
         }
 
         if (variablesTree)
@@ -14722,6 +15363,14 @@ void CompilerIDE::setTheme(bool dark)
                 "    padding: 4px;"
                 "    border: 1px solid #CCCCCC;"
                 "}");
+            if (eyeCare)
+            {
+                variablesTree->setStyleSheet(
+                    "QTreeWidget { background-color: #FDF6E3; color: #3B3A32; }"
+                    "QTreeWidget::item:selected { background-color: #7F9E68; color: white; }"
+                    "QTreeWidget::item:hover { background-color: #E9DDBB; }"
+                    "QHeaderView::section { background-color: #E5D9B7; color: #3B3A32; padding: 4px; border: 1px solid #B9AA7D; }");
+            }
         }
 
         if (callStackList)
@@ -14739,6 +15388,13 @@ void CompilerIDE::setTheme(bool dark)
                 "QListWidget::item:hover {"
                 "    background-color: #E5F3FF;"
                 "}");
+            if (eyeCare)
+            {
+                callStackList->setStyleSheet(
+                    "QListWidget { background-color: #FDF6E3; color: #3B3A32; border: 1px solid #B9AA7D; }"
+                    "QListWidget::item:selected { background-color: #7F9E68; color: white; }"
+                    "QListWidget::item:hover { background-color: #E9DDBB; }");
+            }
         }
 
         if (expressionInput)
@@ -14750,6 +15406,11 @@ void CompilerIDE::setTheme(bool dark)
                 "    border: 1px solid #CCCCCC;"
                 "    padding: 4px;"
                 "}");
+            if (eyeCare)
+            {
+                expressionInput->setStyleSheet(
+                    "QLineEdit { background-color: #F8EFCF; color: #3B3A32; border: 1px solid #B9AA7D; padding: 4px; }");
+            }
         }
 
         if (watchList)
@@ -14764,6 +15425,12 @@ void CompilerIDE::setTheme(bool dark)
                 "    background-color: #0078D7;"
                 "    color: white;"
                 "}");
+            if (eyeCare)
+            {
+                watchList->setStyleSheet(
+                    "QListWidget { background-color: #FDF6E3; color: #3B3A32; border: 1px solid #B9AA7D; }"
+                    "QListWidget::item:selected { background-color: #7F9E68; color: white; }");
+            }
         }
 
         if (cpuChart)
@@ -14775,9 +15442,81 @@ void CompilerIDE::setTheme(bool dark)
             memoryChart->setTheme(QChart::ChartThemeLight);
         }
 
+        auto applyEyeCareChartTheme = [](QChart *chart, QChartView *chartView)
+        {
+            if (!chart)
+            {
+                return;
+            }
+
+            chart->setBackgroundBrush(QColor("#FDF6E3"));
+            chart->setPlotAreaBackgroundBrush(QColor("#F8EFCF"));
+            chart->setPlotAreaBackgroundVisible(true);
+            chart->setTitleBrush(QColor("#3B3A32"));
+            if (chart->legend())
+            {
+                chart->legend()->setLabelColor(QColor("#3B3A32"));
+            }
+            const QList<QAbstractAxis *> axes = chart->axes();
+            for (QAbstractAxis *axis : axes)
+            {
+                axis->setLabelsColor(QColor("#5F6254"));
+                axis->setTitleBrush(QColor("#3B3A32"));
+                axis->setGridLineColor(QColor("#D8CBA5"));
+                axis->setLinePenColor(QColor("#A9986B"));
+            }
+            if (chartView)
+            {
+                chartView->setStyleSheet("QChartView { background-color: #FDF6E3; border: none; }");
+            }
+        };
+
+        if (eyeCare)
+        {
+            applyEyeCareChartTheme(cpuChart, cpuChartView);
+            applyEyeCareChartTheme(memoryChart, memoryChartView);
+        }
+        else
+        {
+            auto applyLightChartTheme = [](QChart *chart, QChartView *chartView)
+            {
+                if (!chart)
+                {
+                    return;
+                }
+
+                chart->setTheme(QChart::ChartThemeLight);
+                chart->setBackgroundBrush(QColor("#FFFFFF"));
+                chart->setPlotAreaBackgroundBrush(Qt::NoBrush);
+                chart->setPlotAreaBackgroundVisible(false);
+                chart->setTitleBrush(QColor("#30343A"));
+                if (chart->legend())
+                {
+                    chart->legend()->setLabelColor(QColor("#40454D"));
+                }
+                const QList<QAbstractAxis *> axes = chart->axes();
+                for (QAbstractAxis *axis : axes)
+                {
+                    axis->setLabelsColor(QColor("#505761"));
+                    axis->setTitleBrush(QColor("#40454D"));
+                    axis->setGridLineColor(QColor("#D7DDE5"));
+                    axis->setLinePenColor(QColor("#9AA3AE"));
+                }
+                chart->update();
+                if (chartView)
+                {
+                    chartView->setStyleSheet("QChartView { background-color: #FFFFFF; border: none; }");
+                    chartView->viewport()->update();
+                }
+            };
+
+            applyLightChartTheme(cpuChart, cpuChartView);
+            applyLightChartTheme(memoryChart, memoryChartView);
+        }
+
         if (terminal)
         {
-            terminal->setTheme(false);
+            terminal->setTheme(mode);
         }
 
         if (timerLabel)
@@ -14789,6 +15528,11 @@ void CompilerIDE::setTheme(bool dark)
                 "    font-weight: bold;"
                 "    padding: 5px;"
                 "}");
+            if (eyeCare)
+            {
+                timerLabel->setStyleSheet(
+                    "QLabel { color: #3B3A32; font-size: 14pt; font-weight: bold; padding: 5px; }");
+            }
         }
     }
 
@@ -14797,23 +15541,116 @@ void CompilerIDE::setTheme(bool dark)
         CodeEditor *editor = editorAt(i);
         if (editor)
         {
-            editor->setDarkThemeEnabled(dark);
+            editor->setThemeMode(mode);
         }
     }
 
-    setProperty("darkTheme", dark);
+    setProperty("darkTheme", darkTheme);
+    setProperty("themeMode", static_cast<int>(themeMode));
+
     if (rightSidebar)
     {
-        rightSidebar->setDarkTheme(dark);
+        rightSidebar->setDarkTheme(darkTheme);
     }
-    updateCompetitiveCompanionPanelStyle(dark);
-    updateSampleTesterStyle(dark);
+
+    updateCompetitiveCompanionPanelStyle(darkTheme);
+    updateSampleTesterStyle(darkTheme);
+
     if (checkerWidget)
     {
-        checkerWidget->setTheme(dark);
+        checkerWidget->setTheme(darkTheme);
     }
+
+    if (outputEdit)
+    {
+        struct OutputColorRange
+        {
+            int position;
+            int length;
+            QColor color;
+        };
+
+        const QColor targetDefault = defaultFormat.foreground().color();
+        const QColor targetSuccess = successFormat.foreground().color();
+        const QColor targetError = errorFormat.foreground().color();
+        const QList<QColor> successColors = {
+            QColor(0, 255, 255), QColor(0, 150, 0), QColor("#477A3D"), Qt::green, Qt::darkGreen};
+        const QList<QColor> errorColors = {
+            QColor(255, 50, 50), QColor(200, 0, 0), QColor("#A23B32"), Qt::red, Qt::darkRed};
+        QList<OutputColorRange> ranges;
+
+        for (QTextBlock block = outputEdit->document()->begin(); block.isValid(); block = block.next())
+        {
+            for (QTextBlock::iterator iterator = block.begin(); !iterator.atEnd(); ++iterator)
+            {
+                const QTextFragment fragment = iterator.fragment();
+                if (!fragment.isValid() || fragment.length() <= 0)
+                {
+                    continue;
+                }
+
+                const QColor sourceColor = fragment.charFormat().foreground().color();
+                QColor targetColor = targetDefault;
+                if (successColors.contains(sourceColor))
+                {
+                    targetColor = targetSuccess;
+                }
+                else if (errorColors.contains(sourceColor))
+                {
+                    targetColor = targetError;
+                }
+                ranges.append({fragment.position(), fragment.length(), targetColor});
+            }
+        }
+
+        for (const OutputColorRange &range : ranges)
+        {
+            QTextCursor cursor(outputEdit->document());
+            cursor.setPosition(range.position);
+            cursor.setPosition(range.position + range.length, QTextCursor::KeepAnchor);
+            QTextCharFormat format;
+            format.setForeground(range.color);
+            cursor.mergeCharFormat(format);
+        }
+        resetOutputFormat();
+        outputEdit->viewport()->update();
+    }
+
+    if (errorTableWidget)
+    {
+        const QColor rowBackground = dark ? QColor(25, 25, 25) : eyeCare ? QColor("#FDF6E3") : QColor(Qt::white);
+        const QColor rowError = dark ? QColor(Qt::red) : eyeCare ? QColor("#A23B32") : QColor(Qt::darkRed);
+        const QColor rowWarning = dark ? QColor(255, 165, 0) : eyeCare ? QColor("#9A6518") : QColor(200, 100, 0);
+
+        for (int row = 0; row < errorTableWidget->rowCount(); ++row)
+        {
+            const QTableWidgetItem *messageItem = errorTableWidget->item(row, 3);
+            const bool warning = messageItem && messageItem->text().startsWith("[warning]", Qt::CaseInsensitive);
+            const QColor foreground = warning ? rowWarning : rowError;
+            for (int column = 0; column < errorTableWidget->columnCount(); ++column)
+            {
+                QTableWidgetItem *item = errorTableWidget->item(row, column);
+                if (item)
+                {
+                    item->setForeground(foreground);
+                    item->setBackground(rowBackground);
+                }
+            }
+        }
+
+        QHeaderView *header = errorTableWidget->horizontalHeader();
+        header->setStretchLastSection(true);
+        header->setSectionResizeMode(3, QHeaderView::Stretch);
+        errorTableWidget->viewport()->update();
+        header->viewport()->update();
+    }
+
     updateComboBoxStyles();
     applyGlobalMenuStyle();
+    if (competitionMode && timerLabel)
+    {
+        updateTimerDisplay();
+    }
     update();
 }
 
@@ -14884,6 +15721,7 @@ void CompilerIDE::addToRecentFiles(const QString &filePath)
 void CompilerIDE::loadRecentFiles()
 {
     QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
+    settings.sync();
     recentFiles = settings.value("recentFiles").toStringList();
 }
 
@@ -14891,6 +15729,12 @@ void CompilerIDE::saveRecentFiles()
 {
     QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
     settings.setValue("recentFiles", recentFiles);
+    settings.sync();
+}
+
+void CompilerIDE::refreshRecentFiles()
+{
+    loadRecentFiles();
 }
 
 QString CompilerIDE::detectCompilerType(const QString &compilerPath)
@@ -15127,6 +15971,23 @@ void CompilerIDE::closeEvent(QCloseEvent *event)
     {
         event->ignore();
         return;
+    }
+
+    if (competitionMode)
+    {
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this, tr("退出竞赛模式"),
+            tr("您正处于竞赛模式中，确定要退出竞赛模式并关闭 IDE 吗？"),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+
+        if (reply != QMessageBox::Yes)
+        {
+            event->ignore();
+            return;
+        }
+
+        stopCompetitionMode();
     }
 
     if (debugger && debugger->isRunning())
@@ -17974,6 +18835,64 @@ void CompilerIDE::onVariableDoubleClicked(int row, int column)
 
 bool CompilerIDE::eventFilter(QObject *watched, QEvent *event)
 {
+    if (QDialog *dialog = qobject_cast<QDialog *>(watched))
+    {
+        if (dialog->isModal() &&
+            (event->type() == QEvent::Show || event->type() == QEvent::WindowActivate))
+        {
+            bool belongsToIde = false;
+            QWidget *parent = dialog->parentWidget();
+            while (parent)
+            {
+                if (parent == this)
+                {
+                    belongsToIde = true;
+                    break;
+                }
+                parent = parent->parentWidget();
+            }
+
+            if (!belongsToIde && !dialog->parentWidget() && isVisible())
+            {
+                belongsToIde = true;
+            }
+
+            if (belongsToIde)
+            {
+                const bool centerOnShow = event->type() == QEvent::Show;
+                QPointer<QDialog> guardedDialog(dialog);
+                QTimer::singleShot(0, this, [this, guardedDialog, centerOnShow]()
+                                   {
+                                       if (!guardedDialog || !guardedDialog->isVisible())
+                                       {
+                                           return;
+                                       }
+
+                                       QScreen *screen = guardedDialog->screen();
+                                       const QRect available = screen ? screen->availableGeometry() : frameGeometry();
+                                       const QPoint topLeft = guardedDialog->frameGeometry().topLeft();
+                                       const bool movedToCorner =
+                                           qAbs(topLeft.x() - available.left()) <= 24 &&
+                                           qAbs(topLeft.y() - available.top()) <= 24;
+                                       if (!centerOnShow && !movedToCorner)
+                                       {
+                                           return;
+                                       }
+
+                                       const QRect target = frameGeometry();
+                                       const QSize size = guardedDialog->frameGeometry().size();
+                                       QPoint position(target.center().x() - size.width() / 2,
+                                                       target.center().y() - size.height() / 2);
+                                       position.setX(qBound(available.left(), position.x(),
+                                                            available.right() - size.width() + 1));
+                                       position.setY(qBound(available.top(), position.y(),
+                                                            available.bottom() - size.height() + 1));
+                                       guardedDialog->move(position);
+                                   });
+            }
+        }
+    }
+
     if (watched == competitionStatusLabel && event->type() == QEvent::MouseButtonPress)
     {
         QMouseEvent *mouseEvent = static_cast<QMouseEvent *>(event);
@@ -18406,7 +19325,7 @@ void CompilerIDE::createToolBars()
     viewToolBar->addAction(resetZoomAct);
 
     buildToolBar->addSeparator();
-    QLabel *standardLabel = new QLabel(tr("C++标准:"));
+    QLabel *standardLabel = new QLabel(tr("  C++标准: "));
     buildToolBar->addWidget(standardLabel);
 
     cppStandardCombo = new QComboBox;
@@ -19069,10 +19988,11 @@ void CompilerIDE::updateTimerDisplay()
     QString newStyle;
     QString statusColor;
 
-    QString bgColor = darkTheme ? "#2D3047" : "#F0F0F0";
-    QString textColorNormal = darkTheme ? "#2E86AB" : "#1E5A8E";
-    QString textColorWarning = darkTheme ? "#F18F01" : "#D97706";
-    QString textColorDanger = darkTheme ? "#FF6B6B" : "#DC2626";
+    const bool eyeCare = !darkTheme && themeMode == ThemeMode::EyeCare;
+    QString bgColor = darkTheme ? "#2D3047" : eyeCare ? "#F3E8C8" : "#F0F0F0";
+    QString textColorNormal = darkTheme ? "#2E86AB" : eyeCare ? "#5F7C4C" : "#1E5A8E";
+    QString textColorWarning = darkTheme ? "#F18F01" : eyeCare ? "#A56C1F" : "#D97706";
+    QString textColorDanger = darkTheme ? "#FF6B6B" : eyeCare ? "#B24C3D" : "#DC2626";
 
     if (isCountdown)
     {
@@ -20070,7 +20990,10 @@ void CompilerIDE::writeSettings()
     settings.setValue("indentSize", indentSize);
     settings.setValue("codeFolding", codeFolding);
     settings.setValue("lineNumbers", lineNumbers);
-    settings.setValue("darkTheme", darkTheme);
+    settings.setValue("themeMode", static_cast<int>(themeMode));
+    settings.setValue("darkTheme", themeMode == ThemeMode::Dark);
+    settings.sync();
+    recentFiles = settings.value("recentFiles", recentFiles).toStringList();
     settings.setValue("recentFiles", recentFiles);
     settings.setValue("cppStandard", cppStandard);
     settings.setValue("optimizationLevel", optimizationLevel);
@@ -20157,7 +21080,28 @@ void CompilerIDE::readSettings()
     indentSize = settings.value("indentSize", 4).toInt();
     codeFolding = settings.value("codeFolding", true).toBool();
     lineNumbers = settings.value("lineNumbers", true).toBool();
-    darkTheme = settings.value("darkTheme", true).toBool();
+    int savedThemeMode;
+    if (settings.contains("themeMode"))
+    {
+        savedThemeMode = settings.value(
+            "themeMode",
+            static_cast<int>(ThemeMode::Dark)).toInt();
+    }
+    else
+    {
+        bool oldDarkTheme = settings.value("darkTheme", true).toBool();
+        savedThemeMode = oldDarkTheme
+                             ? static_cast<int>(ThemeMode::Dark)
+                             : static_cast<int>(ThemeMode::Light);
+    }
+
+    savedThemeMode = qBound(
+        static_cast<int>(ThemeMode::Light),
+        savedThemeMode,
+        static_cast<int>(ThemeMode::Dark));
+
+    themeMode = static_cast<ThemeMode>(savedThemeMode);
+    darkTheme = themeMode == ThemeMode::Dark;
     recentFiles = settings.value("recentFiles", QStringList()).toStringList();
     cppStandard = settings.value("cppStandard", "c++17").toString();
     int standardIndex = cppStandardCombo->findText(cppStandard.toUpper());
@@ -20172,7 +21116,7 @@ void CompilerIDE::readSettings()
     {
         optimizationCombo->setCurrentIndex(optIndex);
     }
-    setTheme(darkTheme);
+    setTheme(themeMode);
     compilerType = detectCompilerType(compilerPath);
     checkCompilerSupport();
     for (int i = 0; i < tabWidget->count(); i++)
@@ -20186,8 +21130,8 @@ void CompilerIDE::readSettings()
             editor->setIndentSize(indentSize);
             editor->setCodeFoldingEnabled(codeFolding);
             editor->setLineNumbersEnabled(lineNumbers);
-            editor->setDarkThemeEnabled(darkTheme);
-            editor->setFont(editorFont);
+            editor->setThemeMode(themeMode);
+            editor->setEditorFont(editorFont);
             if (codeCompletionEnabled)
             {
                 editor->setCompletionEnabled(true);
@@ -20221,22 +21165,22 @@ void CompilerIDE::readSettings()
         qDebug() << "检测到重启标记，恢复文件:" << openFiles;
 
         QTimer::singleShot(200, this, [this, openFiles, savedIndex]()
-                           {
-                               for (const QString &filePath : openFiles)
-                               {
-                                   if (QFile::exists(filePath))
-                                   {
+                            {
+                                for (const QString &filePath : openFiles)
+                                {
+                                    if (QFile::exists(filePath))
+                                    {
                                        loadFile(filePath);
-                                   }
-                               }
+                                    }
+                                }
 
-                               if (savedIndex >= 0 && savedIndex < tabWidget->count())
-                               {
+                                if (savedIndex >= 0 && savedIndex < tabWidget->count())
+                                {
                                    tabWidget->setCurrentIndex(savedIndex);
-                               }
+                                }
 
                                statusBar()->showMessage(tr("已恢复之前打开的文件"), 3000);
-                           });
+                            });
 
         settings.setValue("needReopen", false);
         settings.remove("openFilesOnRestart");
@@ -20959,11 +21903,12 @@ void CompilerIDE::updateCompetitiveCompanionPanelStyle(bool dark)
         return;
     }
 
-    const QString panelBackground = dark ? "#232529" : "#ffffff";
-    const QString panelBorder = dark ? "#383b41" : "#d9dee7";
-    const QString buttonText = dark ? "#aeb4bf" : "#687180";
-    const QString buttonHoverText = dark ? "#f4f6f8" : "#20242b";
-    const QString buttonHoverBackground = dark ? "#303238" : "#f1f4f8";
+    const bool eyeCare = !dark && themeMode == ThemeMode::EyeCare;
+    const QString panelBackground = dark ? "#232529" : eyeCare ? "#F8EFCF" : "#ffffff";
+    const QString panelBorder = dark ? "#383b41" : eyeCare ? "#C7B98E" : "#d9dee7";
+    const QString buttonText = dark ? "#aeb4bf" : eyeCare ? "#5F6254" : "#687180";
+    const QString buttonHoverText = dark ? "#f4f6f8" : eyeCare ? "#2F3528" : "#20242b";
+    const QString buttonHoverBackground = dark ? "#303238" : eyeCare ? "#E9DDBB" : "#f1f4f8";
 
     competitiveCompanionPanel->setStyleSheet(
         QString(
@@ -21003,21 +21948,22 @@ void CompilerIDE::updateSampleTesterStyle(bool dark)
         return;
     }
 
-    const QString textColor = dark ? "#eef0f3" : "#20242b";
-    const QString mutedText = dark ? "#a4aab4" : "#697382";
-    const QString borderColor = dark ? "#373a40" : "#d9dee7";
-    const QString fieldBackground = dark ? "#202226" : "#ffffff";
-    const QString fieldBorder = dark ? "#444850" : "#cfd6e0";
-    const QString primary = dark ? "#4d8df7" : "#3478e5";
-    const QString primaryHover = dark ? "#5b98fb" : "#2868cc";
-    const QString primaryPressed = dark ? "#3979e3" : "#2057ad";
-    const QString secondaryHover = dark ? "#2c2f34" : "#f2f5f9";
-    const QString scrollTrack = dark ? "#202226" : "#f1f3f6";
-    const QString scrollHandle = dark ? "#555b65" : "#b9c1cc";
-    const QString scrollHandleHover = dark ? "#69717d" : "#9fa9b6";
-    const QString spinButtonBackground = dark ? "#2a2d32" : "#f3f5f8";
-    const QString spinButtonHover = dark ? "#353941" : "#e6ebf1";
-    const QString spinButtonPressed = dark ? "#3d434d" : "#d9e0e8";
+    const bool eyeCare = !dark && themeMode == ThemeMode::EyeCare;
+    const QString textColor = dark ? "#eef0f3" : eyeCare ? "#3B3A32" : "#20242b";
+    const QString mutedText = dark ? "#a4aab4" : eyeCare ? "#6B6658" : "#697382";
+    const QString borderColor = dark ? "#373a40" : eyeCare ? "#C7B98E" : "#d9dee7";
+    const QString fieldBackground = dark ? "#202226" : eyeCare ? "#F8EFCF" : "#ffffff";
+    const QString fieldBorder = dark ? "#444850" : eyeCare ? "#B9AA7D" : "#cfd6e0";
+    const QString primary = dark ? "#4d8df7" : eyeCare ? "#6F8F5B" : "#3478e5";
+    const QString primaryHover = dark ? "#5b98fb" : eyeCare ? "#617E50" : "#2868cc";
+    const QString primaryPressed = dark ? "#3979e3" : eyeCare ? "#536E45" : "#2057ad";
+    const QString secondaryHover = dark ? "#2c2f34" : eyeCare ? "#E9DDBB" : "#f2f5f9";
+    const QString scrollTrack = dark ? "#202226" : eyeCare ? "#F3E8C8" : "#f1f3f6";
+    const QString scrollHandle = dark ? "#555b65" : eyeCare ? "#B9AA7D" : "#b9c1cc";
+    const QString scrollHandleHover = dark ? "#69717d" : eyeCare ? "#9F9069" : "#9fa9b6";
+    const QString spinButtonBackground = dark ? "#2a2d32" : eyeCare ? "#F3E8C8" : "#f3f5f8";
+    const QString spinButtonHover = dark ? "#353941" : eyeCare ? "#E9DDBB" : "#e6ebf1";
+    const QString spinButtonPressed = dark ? "#3d434d" : eyeCare ? "#DCCFA8" : "#d9e0e8";
 
     QString style(
         "QWidget#sampleTesterRoot {"
@@ -21175,24 +22121,25 @@ void CompilerIDE::updateTestCaseWidgetStyle(QWidget *testWidget, bool dark)
         return;
     }
 
-    const QString cardBackground = dark ? "#25272b" : "#ffffff";
-    const QString cardBorder = dark ? "#484d56" : "#c8d0db";
-    const QString separator = dark ? "#4a4f58" : "#d0d7e1";
-    const QString textColor = dark ? "#f0f2f5" : "#20242b";
-    const QString secondaryText = dark ? "#a7adb7" : "#687282";
-    const QString placeholderText = dark ? "#767e8b" : "#929ba8";
-    const QString editorBackground = dark ? "#1f2125" : "#fbfcfe";
-    const QString actualBackground = dark ? "#22252a" : "#f5f7fa";
-    const QString editorBorder = dark ? "#42464e" : "#d5dbe4";
-    const QString editorHoverBorder = dark ? "#5a606a" : "#b6c0cc";
-    const QString primary = dark ? "#4d8df7" : "#3478e5";
-    const QString primaryHover = dark ? "#5b98fb" : "#2868cc";
-    const QString primaryPressed = dark ? "#3979e3" : "#2057ad";
-    const QString deleteText = dark ? "#e58b91" : "#c84f59";
-    const QString deleteHover = dark ? "#35272a" : "#fff1f2";
-    const QString collapseText = dark ? "#9fa6b1" : "#6e7785";
-    const QString collapseHoverText = dark ? "#f1f3f5" : "#20242b";
-    const QString collapseHoverBackground = dark ? "#33363c" : "#eef2f6";
+    const bool eyeCare = !dark && themeMode == ThemeMode::EyeCare;
+    const QString cardBackground = dark ? "#25272b" : eyeCare ? "#F8EFCF" : "#ffffff";
+    const QString cardBorder = dark ? "#484d56" : eyeCare ? "#C7B98E" : "#c8d0db";
+    const QString separator = dark ? "#4a4f58" : eyeCare ? "#D8CBA5" : "#d0d7e1";
+    const QString textColor = dark ? "#f0f2f5" : eyeCare ? "#3B3A32" : "#20242b";
+    const QString secondaryText = dark ? "#a7adb7" : eyeCare ? "#6B6658" : "#687282";
+    const QString placeholderText = dark ? "#767e8b" : eyeCare ? "#8A816B" : "#929ba8";
+    const QString editorBackground = dark ? "#1f2125" : eyeCare ? "#FDF6E3" : "#fbfcfe";
+    const QString actualBackground = dark ? "#22252a" : eyeCare ? "#F3E8C8" : "#f5f7fa";
+    const QString editorBorder = dark ? "#42464e" : eyeCare ? "#B9AA7D" : "#d5dbe4";
+    const QString editorHoverBorder = dark ? "#5a606a" : eyeCare ? "#8F805B" : "#b6c0cc";
+    const QString primary = dark ? "#4d8df7" : eyeCare ? "#6F8F5B" : "#3478e5";
+    const QString primaryHover = dark ? "#5b98fb" : eyeCare ? "#617E50" : "#2868cc";
+    const QString primaryPressed = dark ? "#3979e3" : eyeCare ? "#536E45" : "#2057ad";
+    const QString deleteText = dark ? "#e58b91" : eyeCare ? "#A84F46" : "#c84f59";
+    const QString deleteHover = dark ? "#35272a" : eyeCare ? "#F1D7C9" : "#fff1f2";
+    const QString collapseText = dark ? "#9fa6b1" : eyeCare ? "#6B6658" : "#6e7785";
+    const QString collapseHoverText = dark ? "#f1f3f5" : eyeCare ? "#3B3A32" : "#20242b";
+    const QString collapseHoverBackground = dark ? "#33363c" : eyeCare ? "#E9DDBB" : "#eef2f6";
 
     QString style(
         "QWidget#testCaseCard {"
@@ -23830,7 +24777,7 @@ void CompilerIDE::loadFile(const QString &fileName)
     editor->setCodeFoldingEnabled(codeFolding);
     editor->setLineNumbersEnabled(lineNumbers);
     new CppHighlighter(editor->document());
-    editor->setDarkThemeEnabled(darkTheme);
+    editor->setThemeMode(themeMode);
 
     if (codeCompletionEnabled)
     {
@@ -23897,6 +24844,7 @@ void CompilerIDE::loadFile(const QString &fileName)
     tabWidget->setTabToolTip(index2, fileName);
 
     setCurrentFile(fileName);
+    watchOpenedFile(fileName);
     addToRecentFiles(fileName);
     if (m_lspAvailable && m_lspClient)
     {
@@ -23915,12 +24863,363 @@ void CompilerIDE::loadFile(const QString &fileName)
     statusBar()->showMessage(tr("文件已加载"), 2000);
 }
 
+
+QString CompilerIDE::normalizedWatchPath(const QString &filePath) const
+{
+    if (filePath.isEmpty())
+    {
+        return QString();
+    }
+
+    return QDir::cleanPath(QFileInfo(filePath).absoluteFilePath());
+}
+
+int CompilerIDE::findEditorByFilePath(const QString &filePath) const
+{
+    const QString normalizedPath = normalizedWatchPath(filePath);
+    if (normalizedPath.isEmpty())
+    {
+        return -1;
+    }
+
+    for (int i = 0; i < tabWidget->count(); ++i)
+    {
+        const QString tabPath = normalizedWatchPath(tabWidget->tabToolTip(i));
+#ifdef Q_OS_WIN
+        if (QString::compare(tabPath, normalizedPath, Qt::CaseInsensitive) == 0)
+#else
+        if (tabPath == normalizedPath)
+#endif
+        {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+void CompilerIDE::watchOpenedFile(const QString &filePath)
+{
+    if (!fileSystemWatcher)
+    {
+        return;
+    }
+
+    const QString normalizedPath = normalizedWatchPath(filePath);
+    QFileInfo info(normalizedPath);
+    if (normalizedPath.isEmpty() || !info.exists() || !info.isFile())
+    {
+        return;
+    }
+
+    if (!fileSystemWatcher->files().contains(normalizedPath))
+    {
+        fileSystemWatcher->addPath(normalizedPath);
+    }
+
+    info.refresh();
+    watchedFileModifiedTimes[normalizedPath] = info.lastModified().toMSecsSinceEpoch();
+    watchedFileSizes[normalizedPath] = info.size();
+
+    QFile file(normalizedPath);
+    if (file.open(QFile::ReadOnly))
+    {
+        watchedFileHashes[normalizedPath] = QCryptographicHash::hash(
+            file.readAll(), QCryptographicHash::Sha1);
+        file.close();
+    }
+}
+
+void CompilerIDE::unwatchFileIfUnused(const QString &filePath, CodeEditor *excludedEditor)
+{
+    if (!fileSystemWatcher)
+    {
+        return;
+    }
+
+    const QString normalizedPath = normalizedWatchPath(filePath);
+    if (normalizedPath.isEmpty())
+    {
+        return;
+    }
+
+    for (int i = 0; i < tabWidget->count(); ++i)
+    {
+        CodeEditor *editor = editorAt(i);
+        if (!editor || editor == excludedEditor)
+        {
+            continue;
+        }
+
+        const QString tabPath = normalizedWatchPath(tabWidget->tabToolTip(i));
+#ifdef Q_OS_WIN
+        if (QString::compare(tabPath, normalizedPath, Qt::CaseInsensitive) == 0)
+#else
+        if (tabPath == normalizedPath)
+#endif
+        {
+            return;
+        }
+    }
+
+    if (fileSystemWatcher->files().contains(normalizedPath))
+    {
+        fileSystemWatcher->removePath(normalizedPath);
+    }
+    watchedFileModifiedTimes.remove(normalizedPath);
+    watchedFileSizes.remove(normalizedPath);
+    watchedFileHashes.remove(normalizedPath);
+    pendingExternalFileChecks.remove(normalizedPath);
+    activeExternalFilePrompts.remove(normalizedPath);
+}
+
+bool CompilerIDE::reloadEditorFromDisk(CodeEditor *editor, const QString &filePath)
+{
+    if (!editor)
+    {
+        return false;
+    }
+
+    QFile file(filePath);
+    if (!file.open(QFile::ReadOnly))
+    {
+        QMessageBox::warning(this, tr("重新加载失败"),
+                             tr("无法读取文件 %1:\n%2.")
+                                 .arg(QDir::toNativeSeparators(filePath), file.errorString()));
+        return false;
+    }
+
+    const QByteArray data = file.readAll();
+    file.close();
+
+    QString content;
+    QString detectedEncoding;
+    if (data.startsWith("\xEF\xBB\xBF"))
+    {
+        content = QString::fromUtf8(data.mid(3));
+        detectedEncoding = "UTF-8-BOM";
+    }
+    else if (data.startsWith("\xFF\xFE"))
+    {
+        content = QString::fromUtf16(
+            reinterpret_cast<const char16_t *>(data.constData() + 2),
+            (data.size() - 2) / 2);
+        detectedEncoding = "UTF-16LE";
+    }
+    else if (data.startsWith("\xFE\xFF"))
+    {
+        QByteArray swapped;
+        for (int i = 2; i + 1 < data.size(); i += 2)
+        {
+            swapped.append(data[i + 1]);
+            swapped.append(data[i]);
+        }
+        content = QString::fromUtf16(
+            reinterpret_cast<const char16_t *>(swapped.constData()),
+            swapped.size() / 2);
+        detectedEncoding = "UTF-16BE";
+    }
+    else
+    {
+        detectedEncoding = detectFileEncoding(filePath);
+        if (detectedEncoding == "GBK" || detectedEncoding == "Local8Bit")
+        {
+            QStringDecoder gbkDecoder("GBK");
+            if (gbkDecoder.isValid())
+            {
+                content = gbkDecoder.decode(data);
+                detectedEncoding = "GBK";
+            }
+            else
+            {
+                content = QString::fromLocal8Bit(data);
+                detectedEncoding = "Local8Bit";
+            }
+        }
+        else
+        {
+            content = QString::fromUtf8(data);
+            detectedEncoding = "UTF-8";
+        }
+    }
+
+    const int cursorPosition = editor->textCursor().position();
+    const int verticalValue = editor->verticalScrollBar()->value();
+    const int horizontalValue = editor->horizontalScrollBar()->value();
+
+    {
+        QSignalBlocker documentBlocker(editor->document());
+        editor->setPlainText(content);
+        editor->document()->setModified(false);
+    }
+
+    QTextCursor cursor = editor->textCursor();
+    cursor.setPosition(qMin(cursorPosition, editor->document()->characterCount() - 1));
+    editor->setTextCursor(cursor);
+    editor->verticalScrollBar()->setValue(verticalValue);
+    editor->horizontalScrollBar()->setValue(horizontalValue);
+    editorEncodings[editor] = detectedEncoding;
+
+    const int index = tabWidget->indexOf(editor);
+    if (index >= 0)
+    {
+        QString tabTitle = strippedName(filePath);
+        if (editorEasyXFlags.value(editor, false))
+        {
+            tabTitle += " [EasyX]";
+        }
+        tabWidget->setTabText(index, tabTitle);
+        tabWidget->setTabToolTip(index, filePath);
+    }
+
+    if (editor == currentEditor())
+    {
+        curFile = filePath;
+        setWindowFilePath(filePath);
+        setWindowModified(false);
+    }
+
+    editor->setThemeMode(themeMode);
+    editor->document()->markContentsDirty(0, editor->document()->characterCount());
+    editor->clearLspDiagnosticSelections();
+    editor->updateMiniMapScrollBar();
+
+    if (m_lspAvailable && m_lspClient && !editorEasyXFlags.value(editor, false))
+    {
+        sendCloseToLSP(editor);
+        editor->setProperty("lspLastTextHash", QByteArray());
+        sendOpenToLSP(editor, filePath);
+    }
+
+    watchOpenedFile(filePath);
+    statusBar()->showMessage(tr("已重新加载外部修改后的文件"), 3000);
+    return true;
+}
+
+void CompilerIDE::onWatchedFileChanged(const QString &filePath)
+{
+    const QString normalizedPath = normalizedWatchPath(filePath);
+    if (normalizedPath.isEmpty() || pendingExternalFileChecks.contains(normalizedPath))
+    {
+        return;
+    }
+
+    pendingExternalFileChecks.insert(normalizedPath);
+    QTimer::singleShot(250, this, [this, normalizedPath]()
+                       {
+                           pendingExternalFileChecks.remove(normalizedPath);
+
+                           QFileInfo info(normalizedPath);
+                           info.refresh();
+                           if (!info.exists() || !info.isFile())
+                           {
+                               QTimer::singleShot(500, this, [this, normalizedPath]()
+                                                  {
+                                                      if (!QFile::exists(normalizedPath))
+                                                      {
+                                                          return;
+                                                      }
+                                                      if (fileSystemWatcher && !fileSystemWatcher->files().contains(normalizedPath))
+                                                      {
+                                                          fileSystemWatcher->addPath(normalizedPath);
+                                                      }
+                                                      onWatchedFileChanged(normalizedPath);
+                                                  });
+                               return;
+                           }
+
+                           if (fileSystemWatcher && !fileSystemWatcher->files().contains(normalizedPath))
+                           {
+                               fileSystemWatcher->addPath(normalizedPath);
+                           }
+
+                           const qint64 modifiedTime = info.lastModified().toMSecsSinceEpoch();
+                           const qint64 fileSize = info.size();
+                           QByteArray fileHash;
+                           QFile changedFile(normalizedPath);
+                           if (changedFile.open(QFile::ReadOnly))
+                           {
+                               fileHash = QCryptographicHash::hash(
+                                   changedFile.readAll(), QCryptographicHash::Sha1);
+                               changedFile.close();
+                           }
+
+                           if (!fileHash.isEmpty() &&
+                               watchedFileHashes.value(normalizedPath) == fileHash)
+                           {
+                               watchedFileModifiedTimes[normalizedPath] = modifiedTime;
+                               watchedFileSizes[normalizedPath] = fileSize;
+                               return;
+                           }
+
+                           watchedFileModifiedTimes[normalizedPath] = modifiedTime;
+                           watchedFileSizes[normalizedPath] = fileSize;
+                           if (!fileHash.isEmpty())
+                           {
+                               watchedFileHashes[normalizedPath] = fileHash;
+                           }
+
+                           const int index = findEditorByFilePath(normalizedPath);
+                           CodeEditor *editor = editorAt(index);
+                           if (!editor || activeExternalFilePrompts.contains(normalizedPath))
+                           {
+                               return;
+                           }
+
+                           activeExternalFilePrompts.insert(normalizedPath);
+
+                           QMessageBox messageBox(this);
+                           messageBox.setIcon(QMessageBox::Question);
+                           messageBox.setWindowTitle(tr("文件已被外部修改"));
+                           messageBox.setText(
+                               tr("文件“%1”已被其他程序修改，是否重新加载磁盘中的最新内容？")
+                                   .arg(QFileInfo(normalizedPath).fileName()));
+                           if (editor->document()->isModified())
+                           {
+                               messageBox.setInformativeText(
+                                   tr("当前编辑器中还有未保存的修改。重新加载会丢失这些修改。"));
+                           }
+                           else
+                           {
+                               messageBox.setInformativeText(
+                                   tr("选择保留当前内容后，本次外部修改不会覆盖编辑器。"));
+                           }
+                           messageBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+                           messageBox.setDefaultButton(QMessageBox::Yes);
+                           messageBox.setButtonText(QMessageBox::Yes, tr("重新加载"));
+                           messageBox.setButtonText(QMessageBox::No, tr("保留当前内容"));
+
+                           const int result = messageBox.exec();
+                           activeExternalFilePrompts.remove(normalizedPath);
+
+                           if (result == QMessageBox::Yes)
+                           {
+                               reloadEditorFromDisk(editor, normalizedPath);
+                           }
+                       });
+}
+
 void CompilerIDE::onRefactorActionTriggered()
 {
 }
 
 bool CompilerIDE::saveFile(const QString &fileName)
 {
+    CodeEditor *editor = currentEditor();
+    if (!editor)
+    {
+        return false;
+    }
+
+    const int currentIndex = tabWidget->currentIndex();
+    const QString previousFilePath = currentIndex >= 0 ? tabWidget->tabToolTip(currentIndex) : QString();
+    const QString watchedPath = normalizedWatchPath(fileName);
+    const bool wasWatched = fileSystemWatcher && fileSystemWatcher->files().contains(watchedPath);
+    if (wasWatched)
+    {
+        fileSystemWatcher->removePath(watchedPath);
+    }
+
     QFile file(fileName);
     if (!file.open(QFile::WriteOnly | QFile::Text))
     {
@@ -23928,13 +25227,10 @@ bool CompilerIDE::saveFile(const QString &fileName)
                              tr("无法写入文件 %1:\n%2.")
                                  .arg(QDir::toNativeSeparators(fileName),
                                       file.errorString()));
-        return false;
-    }
-
-    CodeEditor *editor = currentEditor();
-    if (!editor)
-    {
-        file.close();
+        if (wasWatched && fileSystemWatcher)
+        {
+            fileSystemWatcher->addPath(watchedPath);
+        }
         return false;
     }
 
@@ -23988,7 +25284,13 @@ bool CompilerIDE::saveFile(const QString &fileName)
     file.close();
     setCurrentFile(fileName);
 
-    int currentIndex = tabWidget->currentIndex();
+    if (!previousFilePath.isEmpty() &&
+        normalizedWatchPath(previousFilePath) != normalizedWatchPath(fileName))
+    {
+        unwatchFileIfUnused(previousFilePath, editor);
+    }
+    watchOpenedFile(fileName);
+
     if (currentIndex >= 0)
     {
         tabWidget->setTabToolTip(currentIndex, fileName);
@@ -24090,7 +25392,7 @@ void CompilerIDE::newFile()
     editor->setCodeFoldingEnabled(codeFolding);
     editor->setLineNumbersEnabled(lineNumbers);
     new CppHighlighter(editor->document());
-    editor->setDarkThemeEnabled(darkTheme);
+    editor->setThemeMode(themeMode);
     QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
     editor->setShowIndentGuides(settings.value("showIndentGuides", true).toBool());
 
@@ -24140,24 +25442,24 @@ void CompilerIDE::newFile()
 
                 QString fileNameCopy = fileName;
                 QTimer::singleShot(0, this, [this, fileNameCopy, line, added]()
-                                   {
-                                       if (!debugger)
-                                       {
-                                           qWarning() << "Debugger not initialized yet";
-                                           return;
-                                       }
+                                    {
+                                        if (!debugger)
+                                        {
+                                            qWarning() << "Debugger not initialized yet";
+                                            return;
+                                        }
 
-                                       if (added)
-                                       {
-                                           debugger->setBreakpoint(fileNameCopy, line);
-                                           outputEdit->appendPlainText(tr("断点已添加: %1:%2").arg(fileNameCopy).arg(line));
-                                       }
-                                       else
-                                       {
-                                           debugger->removeBreakpoint(fileNameCopy, line);
-                                           outputEdit->appendPlainText(tr("断点已移除: %1:%2").arg(fileNameCopy).arg(line));
-                                       }
-                                   });
+                                        if (added)
+                                        {
+                                            debugger->setBreakpoint(fileNameCopy, line);
+                                            outputEdit->appendPlainText(tr("断点已添加: %1:%2").arg(fileNameCopy).arg(line));
+                                        }
+                                        else
+                                        {
+                                            debugger->removeBreakpoint(fileNameCopy, line);
+                                            outputEdit->appendPlainText(tr("断点已移除: %1:%2").arg(fileNameCopy).arg(line));
+                                        }
+                                    });
             });
 
     connect(editor, &CodeEditor::fontSizeChanged,
@@ -24420,14 +25722,17 @@ void CompilerIDE::about()
     aboutDialog.setModal(true);
 
     const bool isDark = darkTheme;
+    const bool isEyeCare = themeMode == ThemeMode::EyeCare;
 
-    const QString bgColor = isDark ? "#202334" : "#FFFFFF";
-    const QString cardColor = isDark ? "#2B2F45" : "#F7F9FC";
-    const QString textColor = isDark ? "#F2F4F8" : "#1F2937";
-    const QString subTextColor = isDark ? "#AAB2C0" : "#667085";
-    const QString borderColor = isDark ? "#454B66" : "#E5E7EB";
-    const QString highlightColor = "#2E86AB";
-    const QString linkColor = isDark ? "#5BC4F5" : "#1A6FA8";
+    const QString bgColor = isDark ? "#202334" : isEyeCare ? "#FDF6E3" : "#FFFFFF";
+    const QString cardColor = isDark ? "#2B2F45" : isEyeCare ? "#F8EFCF" : "#F7F9FC";
+    const QString textColor = isDark ? "#F2F4F8" : isEyeCare ? "#3B3A32" : "#1F2937";
+    const QString subTextColor = isDark ? "#AAB2C0" : isEyeCare ? "#6B6658" : "#667085";
+    const QString borderColor = isDark ? "#454B66" : isEyeCare ? "#C7B98E" : "#E5E7EB";
+    const QString highlightColor = isEyeCare ? "#6F8F5B" : "#2E86AB";
+    const QString highlightHoverColor = isEyeCare ? "#617E50" : "#3B9BC8";
+    const QString highlightPressedColor = isEyeCare ? "#536E45" : "#1E5A7A";
+    const QString linkColor = isDark ? "#5BC4F5" : isEyeCare ? "#557A45" : "#1A6FA8";
 
     aboutDialog.setStyleSheet(QString(
                                   "QDialog {"
@@ -24448,10 +25753,10 @@ void CompilerIDE::about()
                                   "    min-width: 90px;"
                                   "}"
                                   "QPushButton:hover {"
-                                  "    background-color: #3B9BC8;"
+                                  "    background-color: %6;"
                                   "}"
                                   "QPushButton:pressed {"
-                                  "    background-color: #1E5A7A;"
+                                  "    background-color: %7;"
                                   "}"
                                   "QGroupBox {"
                                   "    background-color: %3;"
@@ -24467,7 +25772,13 @@ void CompilerIDE::about()
                                   "    padding: 0 8px;"
                                   "    color: %5;"
                                   "}")
-                                  .arg(bgColor, textColor, cardColor, borderColor, highlightColor));
+                                  .arg(bgColor)
+                                  .arg(textColor)
+                                  .arg(cardColor)
+                                  .arg(borderColor)
+                                  .arg(highlightColor)
+                                  .arg(highlightHoverColor)
+                                  .arg(highlightPressedColor));
 
     QVBoxLayout *mainLayout = new QVBoxLayout(&aboutDialog);
     mainLayout->setContentsMargins(30, 28, 30, 26);
@@ -24609,20 +25920,26 @@ void CompilerIDE::showOpenSourceNotice()
     dialog->setStyleSheet("QDialog { background: transparent; }");
 
     const bool dark = darkTheme;
-    const QString bgStart = dark ? "#0F172A" : "#F0F4F8";
-    const QString bgEnd = dark ? "#1E293B" : "#E2E8F0";
-    const QString cardBg = dark ? "rgba(30, 41, 59, 0.7)" : "rgba(255, 255, 255, 0.7)";
-    const QString border = dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.05)";
-    const QString text = dark ? "#F8FAFC" : "#1E293B";
-    const QString subText = dark ? "#94A3B8" : "#64748B";
-    const QString accent = "#3B82F6";
-    const QString hover = dark ? "rgba(59,130,246,0.1)" : "rgba(59,130,246,0.05)";
-    const QString tooltipBg = dark ? "rgba(20, 25, 35, 0.95)" : "rgba(255, 255, 255, 0.95)";
-    const QString tooltipText = dark ? "#F1F5F9" : "#1E293B";
+    const bool eyeCare = themeMode == ThemeMode::EyeCare;
+    const QString bgStart = dark ? "#0F172A" : eyeCare ? "#FDF6E3" : "#F0F4F8";
+    const QString bgEnd = dark ? "#1E293B" : eyeCare ? "#E9DDBB" : "#E2E8F0";
+    const QString cardBg = dark ? "rgba(30, 41, 59, 0.7)" : eyeCare ? "rgba(248, 239, 207, 0.88)" : "rgba(255, 255, 255, 0.7)";
+    const QString border = dark ? "rgba(255,255,255,0.1)" : eyeCare ? "#C7B98E" : "rgba(0,0,0,0.05)";
+    const QString text = dark ? "#F8FAFC" : eyeCare ? "#3B3A32" : "#1E293B";
+    const QString subText = dark ? "#94A3B8" : eyeCare ? "#6B6658" : "#64748B";
+    const QString accent = eyeCare ? "#6F8F5B" : "#3B82F6";
+    const QString accentSoft = eyeCare ? "rgba(111,143,91,0.15)" : "rgba(59,130,246,0.15)";
+    const QString accentSoftBorder = eyeCare ? "rgba(111,143,91,0.34)" : "rgba(59,130,246,0.3)";
+    const QString accentCountBackground = eyeCare ? "rgba(111,143,91,0.12)" : "rgba(59,130,246,0.1)";
+    const QString accentHover = eyeCare ? "#617E50" : "#2563EB";
+    const QString accentPressed = eyeCare ? "#536E45" : "#1D4ED8";
+    const QString hover = dark ? "rgba(59,130,246,0.1)" : eyeCare ? "rgba(111,143,91,0.12)" : "rgba(59,130,246,0.05)";
+    const QString tooltipBg = dark ? "rgba(20, 25, 35, 0.95)" : eyeCare ? "rgba(248, 239, 207, 0.98)" : "rgba(255, 255, 255, 0.95)";
+    const QString tooltipText = dark ? "#F1F5F9" : eyeCare ? "#3B3A32" : "#1E293B";
 
-    const QString scrollbarTrack = dark ? "rgba(30, 41, 59, 0.5)" : "rgba(226, 232, 240, 0.6)";
-    const QString scrollbarThumb = dark ? "#475569" : "#cbd5e1";
-    const QString scrollbarThumbHover = dark ? "#64748b" : "#94a3b8";
+    const QString scrollbarTrack = dark ? "rgba(30, 41, 59, 0.5)" : eyeCare ? "rgba(229, 217, 183, 0.75)" : "rgba(226, 232, 240, 0.6)";
+    const QString scrollbarThumb = dark ? "#475569" : eyeCare ? "#B9AA7D" : "#cbd5e1";
+    const QString scrollbarThumbHover = dark ? "#64748b" : eyeCare ? "#9F9069" : "#94a3b8";
 
     QPixmap logoPixmap(":/icons/CompilerIDE_logo_bright.png");
     if (logoPixmap.isNull())
@@ -24646,12 +25963,12 @@ void CompilerIDE::showOpenSourceNotice()
     html += ".title-section{flex:1;}";
     html += ".title{font-size:24px;font-weight:700;color:" + text + ";letter-spacing:-0.3px;}";
     html += ".subtitle{font-size:13px;color:" + subText + ";margin-top:6px;}";
-    html += ".badge{background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.3);border-radius:40px;padding:6px 16px;font-size:12px;font-weight:600;color:" + accent + ";white-space:nowrap;}";
+    html += ".badge{background:" + accentSoft + ";border:1px solid " + accentSoftBorder + ";border-radius:40px;padding:6px 16px;font-size:12px;font-weight:600;color:" + accent + ";white-space:nowrap;}";
     html += ".content{padding:24px 32px 40px 32px;flex:1;overflow-y:auto;border-bottom-left-radius:32px;border-bottom-right-radius:32px;}";
     html += ".section-header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:20px;}";
     html += ".section-title{font-size:16px;font-weight:700;color:" + text + ";}";
     html += ".section-desc{font-size:12px;color:" + subText + ";}";
-    html += ".component-count{font-size:12px;color:" + accent + ";background:rgba(59,130,246,0.1);padding:4px 12px;border-radius:40px;}";
+    html += ".component-count{font-size:12px;color:" + accent + ";background:" + accentCountBackground + ";padding:4px 12px;border-radius:40px;}";
     html += ".table-wrapper{overflow-x:auto;margin-bottom:8px;}";
     html += "table{width:100%;border-collapse:collapse;}";
     html += "th{text-align:left;padding:14px 16px;color:" + subText + ";font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid " + border + ";}";
@@ -24750,7 +26067,7 @@ void CompilerIDE::showOpenSourceNotice()
 
     QWidget *buttonBar = new QWidget(dialog);
     buttonBar->setFixedHeight(70);
-    QString btnBarBg = dark ? "rgba(30, 41, 59, 0.85)" : "rgba(255, 255, 255, 0.85)";
+    QString btnBarBg = dark ? "rgba(30, 41, 59, 0.85)" : eyeCare ? "rgba(243, 232, 200, 0.94)" : "rgba(255, 255, 255, 0.85)";
     buttonBar->setStyleSheet(QString("background: %1; border-top: 1px solid %2;").arg(btnBarBg, border));
     QHBoxLayout *btnLayout = new QHBoxLayout(buttonBar);
     btnLayout->setContentsMargins(24, 0, 24, 0);
@@ -24761,9 +26078,9 @@ void CompilerIDE::showOpenSourceNotice()
     closeBtn->setStyleSheet(QString(
                                 "QPushButton { background-color: %1; color: white; border: none; border-radius: 18px; "
                                 "font-size: 13px; font-weight: 600; }"
-                                "QPushButton:hover { background-color: #2563EB; }"
-                                "QPushButton:pressed { background-color: #1D4ED8; }")
-                                .arg(accent));
+                                "QPushButton:hover { background-color: %2; }"
+                                "QPushButton:pressed { background-color: %3; }")
+                                .arg(accent, accentHover, accentPressed));
     connect(closeBtn, &QPushButton::clicked, dialog, &QDialog::accept);
     btnLayout->addWidget(closeBtn);
     layout->addWidget(buttonBar);
@@ -26057,11 +27374,11 @@ void CompilerIDE::updateErrorTable(const QStringList &errors, const QStringList 
         return;
     }
 
-    errorTableWidget->horizontalHeader()->setStretchLastSection(false);
+    errorTableWidget->horizontalHeader()->setStretchLastSection(true);
     errorTableWidget->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     errorTableWidget->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
     errorTableWidget->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
-    errorTableWidget->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Interactive);
+    errorTableWidget->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
 
     int row = 0;
 
@@ -26071,6 +27388,12 @@ void CompilerIDE::updateErrorTable(const QStringList &errors, const QStringList 
         errorColor = Qt::red;
         warningColor = QColor(255, 165, 0);
         backgroundColor = QColor(25, 25, 25);
+    }
+    else if (themeMode == ThemeMode::EyeCare)
+    {
+        errorColor = QColor("#A23B32");
+        warningColor = QColor("#9A6518");
+        backgroundColor = QColor("#FDF6E3");
     }
     else
     {
@@ -26254,19 +27577,8 @@ void CompilerIDE::updateErrorTable(const QStringList &errors, const QStringList 
     errorTableWidget->setColumnWidth(1, 60);
     errorTableWidget->setColumnWidth(2, 60);
 
-    errorTableWidget->resizeColumnToContents(3);
-
-    int availableMessageWidth = errorTableWidget->viewport()->width() - errorTableWidget->columnWidth(0) - errorTableWidget->columnWidth(1) - errorTableWidget->columnWidth(2) - 2;
-
-    if (availableMessageWidth < 200)
-    {
-        availableMessageWidth = 200;
-    }
-
-    if (errorTableWidget->columnWidth(3) < availableMessageWidth)
-    {
-        errorTableWidget->setColumnWidth(3, availableMessageWidth);
-    }
+    errorTableWidget->horizontalHeader()->setStretchLastSection(true);
+    errorTableWidget->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
 
     errorTableWidget->clearSelection();
     errorTableWidget->setCurrentItem(nullptr);
@@ -26701,9 +28013,20 @@ void CompilerIDE::changeCppStandard(int index)
 
 void CompilerIDE::showSettings()
 {
-    SettingsDialog dialog(this, compilerPath, debuggerPath, autoBrackets, autoQuotes, autoIndent,
-                          indentSize, lineNumbers, darkTheme,
-                          codeBeautify, codeCompletionEnabled, editorFont);
+    SettingsDialog dialog(
+        this,
+        compilerPath,
+        debuggerPath,
+        autoBrackets,
+        autoQuotes,
+        autoIndent,
+        indentSize,
+        lineNumbers,
+        themeMode,
+        codeBeautify,
+        codeCompletionEnabled,
+        editorFont);
+
     if (dialog.exec() == QDialog::Accepted)
     {
         debuggerPath = dialog.getDebuggerPath();
@@ -26715,20 +28038,31 @@ void CompilerIDE::showSettings()
             codeCompleter->reloadCustomCompletions();
         }
 
-        applySettings(dialog.getCompilerPath(), dialog.getAutoBrackets(),
-                      dialog.getAutoQuotes(), dialog.getAutoIndent(), dialog.getIndentSize(),
-                      dialog.getLineNumbers(), dialog.getDarkTheme(),
-                      codeCompletionEnabled, dialog.getEditorFont());
+        applySettings(
+            dialog.getCompilerPath(),
+            dialog.getAutoBrackets(),
+            dialog.getAutoQuotes(),
+            dialog.getAutoIndent(),
+            dialog.getIndentSize(),
+            dialog.getLineNumbers(),
+            dialog.getThemeMode(),
+            codeCompletionEnabled,
+            dialog.getEditorFont());
     }
 }
 
-void CompilerIDE::applySettings(const QString &compilerPath, bool autoBrackets,
-                                bool autoQuotes, bool autoIndent, int indentSize,
-                                bool lineNumbers, bool darkTheme,
-                                bool codeCompletion, const QFont &editorFont)
+void CompilerIDE::applySettings(const QString &compilerPath,
+                                bool autoBrackets,
+                                bool autoQuotes,
+                                bool autoIndent,
+                                int indentSize,
+                                bool lineNumbers,
+                                ThemeMode themeMode,
+                                bool codeCompletion,
+                                const QFont &editorFont)
 {
     const QString oldCompilerPath = this->compilerPath;
-    const bool themeChanged = this->darkTheme != darkTheme;
+    const bool themeChanged = this->themeMode != themeMode;
 
     this->compilerPath = compilerPath;
     this->autoBrackets = autoBrackets;
@@ -26738,16 +28072,18 @@ void CompilerIDE::applySettings(const QString &compilerPath, bool autoBrackets,
     this->lineNumbers = lineNumbers;
     this->codeCompletionEnabled = codeCompletion;
     this->editorFont = editorFont;
-    this->darkTheme = darkTheme;
+    this->themeMode = themeMode;
+    this->darkTheme = themeMode == ThemeMode::Dark;
     this->compilerType = detectCompilerType(compilerPath);
 
     if (themeChanged)
     {
-        setTheme(darkTheme);
+        setTheme(themeMode);
     }
 
     QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
-    const bool showIndentGuides = settings.value("showIndentGuides", true).toBool();
+    const bool showIndentGuides =
+        settings.value("showIndentGuides", true).toBool();
 
     for (int i = 0; i < tabWidget->count(); ++i)
     {
@@ -26767,6 +28103,7 @@ void CompilerIDE::applySettings(const QString &compilerPath, bool autoBrackets,
         editor->setLineNumbersEnabled(lineNumbers);
         editor->setCodeBeautifyEnabled(codeBeautify);
         editor->setCompetitionMode(!codeCompletion);
+        editor->setThemeMode(themeMode);
     }
 
     if (oldCompilerPath != compilerPath)
@@ -26834,6 +28171,7 @@ void CompilerIDE::onFileSelected(const QString &filePath)
 
 void CompilerIDE::closeTab(int index)
 {
+    const QString closedFilePath = tabWidget->tabToolTip(index);
     QWidget *widget = tabWidget->widget(index);
     if (!widget)
     {
@@ -26906,6 +28244,7 @@ void CompilerIDE::closeTab(int index)
     }
 
     tabWidget->removeTab(index);
+    unwatchFileIfUnused(closedFilePath, editor);
 
     if (!editor)
     {
@@ -27163,13 +28502,20 @@ void CompilerIDE::zoomIn()
     {
         return;
     }
+
     editor->hideCompletion();
 
     QFont font = editor->font();
-    int newSize = font.pointSize() + 1;
+    const int currentSize = qMax(6, font.pointSize());
+    const int newSize = qMin(currentSize + 1, 72);
+
+    if (newSize == currentSize)
+    {
+        return;
+    }
+
     font.setPointSize(newSize);
-    editor->setFont(font);
-    editor->updateLineNumberAreaWidth(0);
+    editor->setEditorFont(font);
 
     editorFont.setPointSize(newSize);
     writeSettings();
@@ -27182,13 +28528,20 @@ void CompilerIDE::zoomOut()
     {
         return;
     }
+
     editor->hideCompletion();
 
     QFont font = editor->font();
-    int newSize = font.pointSize() - 1;
+    const int currentSize = qMax(6, font.pointSize());
+    const int newSize = qMax(currentSize - 1, 6);
+
+    if (newSize == currentSize)
+    {
+        return;
+    }
+
     font.setPointSize(newSize);
-    editor->setFont(font);
-    editor->updateLineNumberAreaWidth(0);
+    editor->setEditorFont(font);
 
     editorFont.setPointSize(newSize);
     writeSettings();
@@ -27201,13 +28554,13 @@ void CompilerIDE::resetZoom()
     {
         return;
     }
+
     editor->hideCompletion();
 
-    int newSize = 11;
+    const int newSize = 11;
     QFont font = editor->font();
     font.setPointSize(newSize);
-    editor->setFont(font);
-    editor->updateLineNumberAreaWidth(0);
+    editor->setEditorFont(font);
 
     editorFont.setPointSize(newSize);
     writeSettings();
@@ -28521,7 +29874,8 @@ void LuoguFetcherWidget::fetchProblem(const QUrl &url)
 CheckerWidget::CheckerWidget(CompilerIDE *ide, QWidget *parent)
     : QWidget(parent), mainWindow(ide),
       compileProcess(nullptr), dataProcess(nullptr), stdProcess(nullptr), solProcess(nullptr),
-      timer(nullptr), state(Idle), stopRequested(false)
+      timer(nullptr), state(Idle), parallelProcessCount(1), nextParallelGroup(0), completedParallelGroups(0),
+      stopRequested(false), parallelMode(false), parallelFailed(false)
 {
     QVBoxLayout *rootLayout = new QVBoxLayout(this);
     rootLayout->setContentsMargins(0, 0, 0, 0);
@@ -28575,20 +29929,35 @@ CheckerWidget::CheckerWidget(CompilerIDE *ide, QWidget *parent)
 
     contentLayout->addWidget(fileGroup);
 
-    QHBoxLayout *paramLayout = new QHBoxLayout;
-    paramLayout->addWidget(new QLabel(tr("对拍组数:")));
+    QVBoxLayout *paramLayout = new QVBoxLayout;
+    paramLayout->setSpacing(6);
+
+    QHBoxLayout *basicParamLayout = new QHBoxLayout;
+    basicParamLayout->addWidget(new QLabel(tr("对拍组数:")));
     groupCountSpin = new QSpinBox;
     groupCountSpin->setRange(1, 10000);
     groupCountSpin->setValue(100);
-    paramLayout->addWidget(groupCountSpin);
+    basicParamLayout->addWidget(groupCountSpin);
 
-    paramLayout->addSpacing(20);
-    paramLayout->addWidget(new QLabel(tr("时间限制(ms):")));
+    basicParamLayout->addSpacing(20);
+    basicParamLayout->addWidget(new QLabel(tr("时间限制(ms):")));
     timeLimitSpin = new QSpinBox;
     timeLimitSpin->setRange(100, 10000);
     timeLimitSpin->setValue(1000);
-    paramLayout->addWidget(timeLimitSpin);
-    paramLayout->addStretch();
+    basicParamLayout->addWidget(timeLimitSpin);
+    basicParamLayout->addStretch();
+    paramLayout->addLayout(basicParamLayout);
+
+    QHBoxLayout *processParamLayout = new QHBoxLayout;
+    processParamLayout->addWidget(new QLabel(tr("并行进程数:")));
+    processCountSpin = new QSpinBox;
+    const int safeProcessLimit = safeParallelProcessLimit();
+    processCountSpin->setRange(1, safeProcessLimit);
+    processCountSpin->setValue(1);
+    processCountSpin->setToolTip(tr("已按处理器和可用内存限制，当前最多允许 %1 个并行进程").arg(safeProcessLimit));
+    processParamLayout->addWidget(processCountSpin);
+    processParamLayout->addStretch();
+    paramLayout->addLayout(processParamLayout);
 
     contentLayout->addLayout(paramLayout);
 
@@ -28736,6 +30105,7 @@ CheckerWidget::CheckerWidget(CompilerIDE *ide, QWidget *parent)
 
 CheckerWidget::~CheckerWidget()
 {
+    stopParallelTasks();
     cleanUpTempFiles();
     if (compileProcess)
     {
@@ -28879,6 +30249,11 @@ void CheckerWidget::onStartClicked()
     stopRequested = false;
     totalGroups = groupCountSpin->value();
     timeLimitMs = timeLimitSpin->value();
+    const int safeProcessLimit = safeParallelProcessLimit();
+    processCountSpin->setMaximum(safeProcessLimit);
+    processCountSpin->setToolTip(tr("已按处理器和可用内存限制，当前最多允许 %1 个并行进程").arg(safeProcessLimit));
+    parallelProcessCount = qBound(1, processCountSpin->value(), safeProcessLimit);
+    processCountSpin->setValue(parallelProcessCount);
     currentGroup = 0;
     compileErrors.clear();
     mainWindow->updateErrorTable(QStringList(), QStringList());
@@ -28986,7 +30361,14 @@ void CheckerWidget::startNextCompile()
 
         statusLabel->setText(tr("开始对拍..."));
         currentGroup = 0;
-        runData();
+        if (parallelProcessCount > 1)
+        {
+            startParallelRun();
+        }
+        else
+        {
+            runData();
+        }
         return;
     }
 
@@ -29057,7 +30439,7 @@ QStringList CheckerWidget::buildCompilerArgs(const QString &sourceFile, const QS
         {
             args << "/std:c++latest";
         }
-        args << "/EHsc" << "/nologo";
+        args << "/EHsc" << "/nologo" << "/O2";
         args << "/Fe:" + outputExe;
         args << sourceFile;
     }
@@ -29318,8 +30700,10 @@ void CheckerWidget::runStd()
     stdProcess->closeWriteChannel();
 
     currentTimeMs = 0;
+    processTimer.start();
     timer = new QTimer(this);
     timer->setSingleShot(true);
+    timer->setTimerType(Qt::PreciseTimer);
     timer->setInterval(timeLimitMs);
     connect(timer, &QTimer::timeout, this, &CheckerWidget::onTimeout);
     timer->start();
@@ -29399,8 +30783,10 @@ void CheckerWidget::runSol()
     solProcess->closeWriteChannel();
 
     currentTimeMs = 0;
+    processTimer.start();
     timer = new QTimer(this);
     timer->setSingleShot(true);
+    timer->setTimerType(Qt::PreciseTimer);
     timer->setInterval(timeLimitMs);
     connect(timer, &QTimer::timeout, this, &CheckerWidget::onTimeout);
     timer->start();
@@ -29515,7 +30901,49 @@ void CheckerWidget::onTimeout()
         return;
     }
 
-    if (state == RunningStd && stdProcess)
+    QProcess *activeProcess = nullptr;
+    if (state == RunningStd)
+    {
+        activeProcess = stdProcess;
+    }
+    else if (state == RunningSol)
+    {
+        activeProcess = solProcess;
+    }
+
+    if (!activeProcess)
+    {
+        return;
+    }
+
+    if (synchronizeFinishedProcess(activeProcess))
+    {
+        return;
+    }
+
+    const qint64 elapsedMs = processTimer.isValid() ? processTimer.elapsed() : timeLimitMs;
+    if (elapsedMs < timeLimitMs)
+    {
+        if (timer)
+        {
+            timer->start(static_cast<int>(qMax<qint64>(1, timeLimitMs - elapsedMs)));
+        }
+        return;
+    }
+
+    if (timer && !timer->property("timeoutConfirmationPending").toBool())
+    {
+        timer->setProperty("timeoutConfirmationPending", true);
+        timer->start(timeoutConfirmationDelay());
+        return;
+    }
+
+    if (synchronizeFinishedProcess(activeProcess))
+    {
+        return;
+    }
+
+    if (state == RunningStd && stdProcess == activeProcess)
     {
         stdProcess->blockSignals(true);
         disconnect(stdProcess, nullptr, this, nullptr);
@@ -29532,7 +30960,7 @@ void CheckerWidget::onTimeout()
         stdProcess->deleteLater();
         stdProcess = nullptr;
     }
-    else if (state == RunningSol && solProcess)
+    else if (state == RunningSol && solProcess == activeProcess)
     {
         solProcess->blockSignals(true);
         disconnect(solProcess, nullptr, this, nullptr);
@@ -29547,6 +30975,10 @@ void CheckerWidget::onTimeout()
 
         solProcess->deleteLater();
         solProcess = nullptr;
+    }
+    else
+    {
+        return;
     }
 
     setState(Finished);
@@ -29565,6 +30997,7 @@ void CheckerWidget::onTimeout()
 void CheckerWidget::onStopClicked()
 {
     stopRequested = true;
+    stopParallelTasks();
 
     if (dataProcess && dataProcess->state() == QProcess::Running)
     {
@@ -29656,6 +31089,469 @@ void CheckerWidget::onResetClicked()
     setState(Idle);
 }
 
+int CheckerWidget::safeParallelProcessLimit() const
+{
+    const int logicalProcessors = qMax(1, QThread::idealThreadCount());
+    const int processorLimit = qMax(1, logicalProcessors / 2);
+    int memoryLimit = 1;
+
+    MEMORYSTATUSEX memoryStatus;
+    memoryStatus.dwLength = sizeof(MEMORYSTATUSEX);
+    if (GlobalMemoryStatusEx(&memoryStatus))
+    {
+        const quint64 reserveBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+        const quint64 bytesPerProcess = 512ULL * 1024ULL * 1024ULL;
+        if (memoryStatus.ullAvailPhys > reserveBytes)
+        {
+            memoryLimit = static_cast<int>(qMin<quint64>(
+                8,
+                qMax<quint64>(1, (memoryStatus.ullAvailPhys - reserveBytes) / bytesPerProcess)));
+        }
+    }
+
+    return qBound(1, qMin(8, qMin(processorLimit, memoryLimit)), 8);
+}
+
+void CheckerWidget::startParallelRun()
+{
+    stopParallelTasks();
+    parallelMode = true;
+    parallelFailed = false;
+    nextParallelGroup = 0;
+    completedParallelGroups = 0;
+    currentGroup = 0;
+    stageTimer->restart();
+    setState(RunningData);
+
+    const int initialTasks = qMin(parallelProcessCount, totalGroups);
+    for (int i = 0; i < initialTasks; ++i)
+    {
+        launchParallelTask();
+    }
+    updateParallelProgress();
+}
+
+void CheckerWidget::launchParallelTask()
+{
+    if (!parallelMode || parallelFailed || stopRequested || nextParallelGroup >= totalGroups)
+    {
+        return;
+    }
+
+    ParallelTask *task = new ParallelTask;
+    task->groupIndex = nextParallelGroup++;
+    parallelTasks.append(task);
+    startParallelData(task);
+}
+
+void CheckerWidget::startParallelData(ParallelTask *task)
+{
+    if (!task || task->finished || stopRequested || parallelFailed)
+    {
+        return;
+    }
+
+    task->stage = ParallelTask::Generating;
+    task->process = new QProcess(this);
+    task->process->setProcessChannelMode(QProcess::SeparateChannels);
+
+    connect(task->process, &QProcess::errorOccurred, this,
+            [this, task](QProcess::ProcessError error)
+            {
+                if (error == QProcess::FailedToStart)
+                {
+                    failParallelTask(task, tr("数据生成器启动失败"), tr("[data 启动失败] 无法启动数据生成器"));
+                }
+            });
+
+    connect(task->process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, task](int exitCode, QProcess::ExitStatus exitStatus)
+            {
+                if (!task || task->finished || stopRequested || parallelFailed)
+                {
+                    return;
+                }
+
+                if (exitStatus != QProcess::NormalExit || exitCode != 0)
+                {
+                    QString errorMessage = QString::fromLocal8Bit(task->process->readAllStandardError());
+                    if (errorMessage.isEmpty())
+                    {
+                        errorMessage = tr("数据生成器运行失败");
+                    }
+                    failParallelTask(task, tr("数据生成器运行失败"), tr("[data 运行时错误] ") + errorMessage);
+                    return;
+                }
+
+                task->input = QString::fromLocal8Bit(task->process->readAllStandardOutput());
+                task->process->deleteLater();
+                task->process = nullptr;
+                startParallelStandard(task);
+            });
+
+    task->process->start(dataExePath);
+}
+
+void CheckerWidget::startParallelStandard(ParallelTask *task)
+{
+    if (!task || task->finished || stopRequested || parallelFailed)
+    {
+        return;
+    }
+
+    task->stage = ParallelTask::RunningStandard;
+    task->process = new QProcess(this);
+    task->process->setProcessChannelMode(QProcess::SeparateChannels);
+    task->timer = new QTimer(this);
+    task->timer->setSingleShot(true);
+    task->timer->setTimerType(Qt::PreciseTimer);
+
+    connect(task->timer, &QTimer::timeout, this,
+            [this, task]()
+            {
+                handleParallelTimeout(task,
+                                      tr("标准程序超时"),
+                                      tr("[std 超时] 程序运行超时 (TLE)，时间限制: %1ms").arg(timeLimitMs));
+            });
+
+    connect(task->process, &QProcess::started, this,
+            [this, task]()
+            {
+                if (!task || task->finished || stopRequested || parallelFailed)
+                {
+                    return;
+                }
+                task->process->write(task->input.toLocal8Bit());
+                task->process->closeWriteChannel();
+                task->executionTimer.start();
+                task->timer->start(timeLimitMs);
+            });
+
+    connect(task->process, &QProcess::errorOccurred, this,
+            [this, task](QProcess::ProcessError error)
+            {
+                if (error == QProcess::FailedToStart)
+                {
+                    failParallelTask(task, tr("标准程序启动失败"), tr("[std 启动失败] 无法启动标准程序"));
+                }
+            });
+
+    connect(task->process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, task](int exitCode, QProcess::ExitStatus exitStatus)
+            {
+                if (!task || task->finished || stopRequested || parallelFailed)
+                {
+                    return;
+                }
+
+                if (task->timer)
+                {
+                    task->timer->stop();
+                    task->timer->deleteLater();
+                    task->timer = nullptr;
+                }
+
+                if (exitStatus != QProcess::NormalExit || exitCode != 0)
+                {
+                    QString errorMessage = QString::fromLocal8Bit(task->process->readAllStandardError());
+                    if (errorMessage.isEmpty())
+                    {
+                        errorMessage = tr("运行时错误 (RE)");
+                    }
+                    failParallelTask(task, tr("标准程序运行时错误"), tr("[std 运行时错误] ") + errorMessage);
+                    return;
+                }
+
+                task->standardOutput = QString::fromLocal8Bit(task->process->readAllStandardOutput());
+                task->process->deleteLater();
+                task->process = nullptr;
+                startParallelSolution(task);
+            });
+
+    task->process->start(stdExePath);
+}
+
+void CheckerWidget::startParallelSolution(ParallelTask *task)
+{
+    if (!task || task->finished || stopRequested || parallelFailed)
+    {
+        return;
+    }
+
+    task->stage = ParallelTask::RunningSolution;
+    task->process = new QProcess(this);
+    task->process->setProcessChannelMode(QProcess::SeparateChannels);
+    task->timer = new QTimer(this);
+    task->timer->setSingleShot(true);
+    task->timer->setTimerType(Qt::PreciseTimer);
+
+    connect(task->timer, &QTimer::timeout, this,
+            [this, task]()
+            {
+                handleParallelTimeout(task,
+                                      tr("对拍程序超时"),
+                                      tr("[sol 超时] 程序运行超时 (TLE)，时间限制: %1ms").arg(timeLimitMs));
+            });
+
+    connect(task->process, &QProcess::started, this,
+            [this, task]()
+            {
+                if (!task || task->finished || stopRequested || parallelFailed)
+                {
+                    return;
+                }
+                task->process->write(task->input.toLocal8Bit());
+                task->process->closeWriteChannel();
+                task->executionTimer.start();
+                task->timer->start(timeLimitMs);
+            });
+
+    connect(task->process, &QProcess::errorOccurred, this,
+            [this, task](QProcess::ProcessError error)
+            {
+                if (error == QProcess::FailedToStart)
+                {
+                    failParallelTask(task, tr("对拍程序启动失败"), tr("[sol 启动失败] 无法启动对拍程序"));
+                }
+            });
+
+    connect(task->process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, task](int exitCode, QProcess::ExitStatus exitStatus)
+            {
+                if (!task || task->finished || stopRequested || parallelFailed)
+                {
+                    return;
+                }
+
+                if (task->timer)
+                {
+                    task->timer->stop();
+                    task->timer->deleteLater();
+                    task->timer = nullptr;
+                }
+
+                if (exitStatus != QProcess::NormalExit || exitCode != 0)
+                {
+                    QString errorMessage = QString::fromLocal8Bit(task->process->readAllStandardError());
+                    if (errorMessage.isEmpty())
+                    {
+                        errorMessage = tr("运行时错误 (RE)");
+                    }
+                    failParallelTask(task, tr("对拍程序运行时错误"), tr("[sol 运行时错误] ") + errorMessage);
+                    return;
+                }
+
+                task->solutionOutput = QString::fromLocal8Bit(task->process->readAllStandardOutput());
+                if (task->standardOutput.trimmed() != task->solutionOutput.trimmed())
+                {
+                    failParallelTask(task,
+                                     tr("发现答案错误 (WA) - 第 %1 组").arg(task->groupIndex + 1),
+                                     tr("发现答案错误 (WA)"));
+                    return;
+                }
+
+                completeParallelTask(task);
+            });
+
+    task->process->start(solExePath);
+}
+
+bool CheckerWidget::synchronizeFinishedProcess(QProcess *process) const
+{
+    if (!process)
+    {
+        return true;
+    }
+
+    if (process->state() == QProcess::NotRunning)
+    {
+        return true;
+    }
+
+#ifdef Q_OS_WIN
+    const qint64 processId = process->processId();
+    if (processId > 0)
+    {
+        HANDLE processHandle = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(processId));
+        if (processHandle)
+        {
+            const DWORD waitResult = WaitForSingleObject(processHandle, 0);
+            CloseHandle(processHandle);
+            if (waitResult == WAIT_OBJECT_0)
+            {
+                process->waitForFinished(50);
+                return true;
+            }
+        }
+    }
+#endif
+
+    return process->waitForFinished(0);
+}
+
+int CheckerWidget::timeoutConfirmationDelay() const
+{
+    return qBound(5, timeLimitMs / 100, 25);
+}
+
+void CheckerWidget::handleParallelTimeout(ParallelTask *task, const QString &status, const QString &detail)
+{
+    if (!task || task->finished || stopRequested || parallelFailed || !task->process)
+    {
+        return;
+    }
+
+    QProcess *process = task->process;
+    if (synchronizeFinishedProcess(process))
+    {
+        return;
+    }
+
+    const qint64 elapsedMs = task->executionTimer.isValid() ? task->executionTimer.elapsed() : timeLimitMs;
+    if (elapsedMs < timeLimitMs)
+    {
+        if (task->timer)
+        {
+            task->timer->start(static_cast<int>(qMax<qint64>(1, timeLimitMs - elapsedMs)));
+        }
+        return;
+    }
+
+    if (task->timer && !task->timer->property("timeoutConfirmationPending").toBool())
+    {
+        task->timer->setProperty("timeoutConfirmationPending", true);
+        task->timer->start(timeoutConfirmationDelay());
+        return;
+    }
+
+    if (synchronizeFinishedProcess(process))
+    {
+        return;
+    }
+
+    failParallelTask(task, status, detail);
+}
+
+void CheckerWidget::completeParallelTask(ParallelTask *task)
+{
+    if (!task || task->finished || parallelFailed)
+    {
+        return;
+    }
+
+    task->finished = true;
+    destroyParallelTask(task);
+    ++completedParallelGroups;
+    currentGroup = completedParallelGroups;
+    updateParallelProgress();
+
+    if (completedParallelGroups >= totalGroups)
+    {
+        parallelMode = false;
+        completionTimer->start(500);
+        statusLabel->setText(tr("对拍完成，%1 组全部通过").arg(totalGroups));
+        progressStatusLabel->setText(tr("对拍完成"));
+        setState(Finished);
+        startBtn->setEnabled(true);
+        stopBtn->setEnabled(false);
+        resetBtn->setEnabled(true);
+        return;
+    }
+
+    launchParallelTask();
+}
+
+void CheckerWidget::failParallelTask(ParallelTask *task, const QString &status, const QString &detail)
+{
+    if (!task || task->finished || parallelFailed || stopRequested)
+    {
+        return;
+    }
+
+    parallelFailed = true;
+    task->finished = true;
+    currentInput = task->input;
+    currentStdOutput = task->standardOutput;
+    currentSolOutput = task->solutionOutput;
+
+    if (task->stage == ParallelTask::Generating)
+    {
+        currentSolOutput = detail;
+    }
+    else if (task->stage == ParallelTask::RunningStandard)
+    {
+        currentStdOutput.clear();
+        currentSolOutput = detail;
+    }
+    else if (detail != tr("发现答案错误 (WA)"))
+    {
+        currentSolOutput = detail;
+    }
+
+    stopParallelTasks();
+    showWAInfo();
+    statusLabel->setText(status);
+    progressStatusLabel->setText(detail == tr("发现答案错误 (WA)") ? detail : status);
+    setState(Finished);
+    startBtn->setEnabled(true);
+    stopBtn->setEnabled(false);
+    resetBtn->setEnabled(true);
+}
+
+void CheckerWidget::destroyParallelTask(ParallelTask *task)
+{
+    if (!task)
+    {
+        return;
+    }
+
+    parallelTasks.removeAll(task);
+    if (task->timer)
+    {
+        task->timer->stop();
+        task->timer->disconnect(this);
+        task->timer->deleteLater();
+        task->timer = nullptr;
+    }
+    if (task->process)
+    {
+        task->process->disconnect(this);
+        if (task->process->state() != QProcess::NotRunning)
+        {
+            task->process->kill();
+            task->process->waitForFinished(500);
+        }
+        task->process->deleteLater();
+        task->process = nullptr;
+    }
+    delete task;
+}
+
+void CheckerWidget::stopParallelTasks()
+{
+    parallelMode = false;
+    const QList<ParallelTask *> tasks = parallelTasks;
+    for (ParallelTask *task : tasks)
+    {
+        destroyParallelTask(task);
+    }
+    parallelTasks.clear();
+}
+
+void CheckerWidget::updateParallelProgress()
+{
+    progressBar->setValue(completedParallelGroups);
+    const int elapsedSecs = stageTimer->elapsed() / 1000;
+    progressTimeLabel->setText(tr("已用时间: %1s").arg(elapsedSecs));
+    statusLabel->setText(tr("已完成 %1/%2 组，并行进程 %3")
+                             .arg(completedParallelGroups)
+                             .arg(totalGroups)
+                             .arg(parallelProcessCount));
+    progressStatusLabel->setText(tr("正在并行对拍... (%1/%2)")
+                                     .arg(completedParallelGroups)
+                                     .arg(totalGroups));
+}
+
 void CheckerWidget::cleanUpTempFiles()
 {
     if (!tempDir.isEmpty() && QDir(tempDir).exists())
@@ -29668,6 +31564,10 @@ void CheckerWidget::cleanUpTempFiles()
 void CheckerWidget::setState(State newState)
 {
     state = newState;
+    if (processCountSpin)
+    {
+        processCountSpin->setEnabled(newState == Idle || newState == Finished || newState == Stopped);
+    }
 }
 
 void CheckerWidget::updateProgressDisplay()
@@ -29736,6 +31636,7 @@ int main(int argc, char *argv[])
                                     if (welcomeDialog.exec() == QDialog::Accepted)
                                     {
                                         QString selectedFile = welcomeDialog.getSelectedFile();
+                                        ide->refreshRecentFiles();
                                         ide->showMaximized();
                                         ide->show();
                                         ide->raise();
@@ -29784,6 +31685,7 @@ int main(int argc, char *argv[])
                 if (welcomeDialog.exec() == QDialog::Accepted)
                 {
                     QString selectedFile = welcomeDialog.getSelectedFile();
+                    ide->refreshRecentFiles();
                     ide->showMaximized();
                     ide->show();
                     ide->raise();
@@ -29815,9 +31717,9 @@ int main(int argc, char *argv[])
                 ide->raise();
                 ide->activateWindow();
                 QTimer::singleShot(500, ide, [ide]()
-                                   {
-                                       ide->autoCheckForUpdates();
-                                   });
+                                    {
+                                        ide->autoCheckForUpdates();
+                                    });
             }
         }
     }
