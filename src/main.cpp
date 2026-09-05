@@ -5,6 +5,7 @@
  *  AI 创作声明：本 IDE 部分内容使用 DeepSeek、Kimi、GPT 等人工智能模型辅助生成
  *  创作不易，如果你喜欢，可以在 Github 上点一个 Star 哦
 */
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -59,6 +60,7 @@
 #include <QMessageBox>
 #include <QString>
 #include <QClipboard>
+#include <QCursor>
 #include <QGuiApplication>
 #include <QRegularExpression>
 #include <QApplication>
@@ -107,6 +109,7 @@
 #include <QPair>
 #include <QList>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPaintEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -133,6 +136,7 @@
 #include <QTextBlockUserData>
 #include <QScrollArea>
 #include <QScreen>
+#include <QShowEvent>
 #include <QTemporaryFile>
 #include <QPropertyAnimation>
 #include <QEasingCurve>
@@ -171,10 +175,10 @@
 
 #pragma comment(lib, "windowsapp.lib")
 
-const QString IDE_VERSION = "3.7.0";
+const QString IDE_VERSION = "3.8.0";
 
-const QString BUILD_DATE = "2026-08-04";
-const QString BUILD_TIME = "12:40:53";
+const QString BUILD_DATE = "2026-08-30";
+const QString BUILD_TIME = "20:12:07";
 
 enum class ThemeMode
 {
@@ -314,7 +318,7 @@ public:
     void closeDocument(const QString &uri);
 
 signals:
-    void diagnosticsReceived(const QString &uri, const QList<LSPDiagnostic> &diags);
+    void diagnosticsReceived(const QString &uri, int version, const QList<LSPDiagnostic> &diags);
     void serverError(const QString &error);
 
 private slots:
@@ -399,6 +403,15 @@ bool LSPClient::startServer(const QString &clangdPath, const QString &compileCom
                 QJsonObject syncCaps;
                 syncCaps["dynamicRegistration"] = false;
                 textDocumentCaps["synchronization"] = syncCaps;
+
+                // LSP 3.15+: tell clangd that this client understands the optional
+                // PublishDiagnosticsParams.version field.  The hover layer relies on
+                // this to avoid attaching a diagnostic from an older draft to newer
+                // source text after rapid edits.
+                QJsonObject publishDiagnosticsCaps;
+                publishDiagnosticsCaps["versionSupport"] = true;
+                textDocumentCaps["publishDiagnostics"] = publishDiagnosticsCaps;
+
                 capabilities["textDocument"] = textDocumentCaps;
 
                 QJsonObject params;
@@ -505,6 +518,11 @@ void LSPClient::changeDocument(const QString &uri, const QString &text, int vers
 
     params["contentChanges"] = changes;
 
+    // clangd extension: require diagnostics for exactly this document revision.
+    // This avoids its normal diagnostic coalescing from leaving an older message
+    // visible after rapid edits. clangd 7+ supports this field.
+    params["wantDiagnostics"] = true;
+
     QJsonObject msg;
     msg["jsonrpc"] = "2.0";
     msg["method"] = "textDocument/didChange";
@@ -599,6 +617,9 @@ void LSPClient::handleNotification(const QJsonObject &notif)
     {
         QJsonObject params = notif["params"].toObject();
         QString uri = params["uri"].toString();
+        const int version = params.contains("version") && params["version"].isDouble()
+                                ? params["version"].toInt()
+                                : -1;
         QJsonArray diags = params["diagnostics"].toArray();
         QList<LSPDiagnostic> out;
         for (const QJsonValue &v : diags)
@@ -632,7 +653,7 @@ void LSPClient::handleNotification(const QJsonObject &notif)
             }
             out.append(diag);
         }
-        emit diagnosticsReceived(uri, out);
+        emit diagnosticsReceived(uri, version, out);
     }
 }
 
@@ -653,7 +674,9 @@ public:
                             ThemeMode currentTheme = ThemeMode::Dark,
                             bool codeBeautify = true,
                             bool codeCompletion = true,
-                            const QFont &editorFont = QFont("Consolas", 11));
+                            const QFont &editorFont = QFont("Consolas", 11),
+                            const QStringList &customCompileCommands = QStringList(),
+                            const QString &currentCustomCompileCommand = QString());
 
     QString getCompilerPath() const;
     QString getDebuggerPath() const;
@@ -668,6 +691,8 @@ public:
     QFont getEditorFont() const;
     int getEditorFontSize() const;
     bool getShowIndentGuides() const;
+    QStringList getCustomCompileCommands() const;
+    QString getCurrentCustomCompileCommand() const;
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
@@ -678,6 +703,8 @@ private slots:
     void onCompilerPathChanged(const QString &path);
     void addCustomCompletion();
     void removeCustomCompletion();
+    void addCustomCompileCommand();
+    void removeCustomCompileCommand();
 
 private:
     QFontComboBox *fontCombo;
@@ -698,6 +725,8 @@ private:
     QLineEdit *newCompletionEdit;
     QComboBox *themeCombo;
     QComboBox *uiStyleCombo;
+    QComboBox *compileCommandCombo = nullptr;
+    QLineEdit *newCompileCommandEdit = nullptr;
 
     QString findCompilerInPath(const QString &basePath);
     QString findDebuggerFromCompilerPath(const QString &compilerPath);
@@ -717,7 +746,9 @@ SettingsDialog::SettingsDialog(QWidget *parent,
                                ThemeMode currentTheme,
                                bool codeBeautify,
                                bool codeCompletion,
-                               const QFont &editorFont)
+                               const QFont &editorFont,
+                               const QStringList &customCompileCommands,
+                               const QString &currentCustomCompileCommand)
     : QDialog(parent)
 {
     const bool darkTheme = currentTheme == ThemeMode::Dark;
@@ -912,14 +943,71 @@ SettingsDialog::SettingsDialog(QWidget *parent,
 
     debuggerGroup->setLayout(debuggerLayout);
 
+    QGroupBox *compileCommandGroup = new QGroupBox(tr("自定义编译命令"));
+    compileCommandGroup->setStyleSheet(groupBoxStyle);
+    QVBoxLayout *compileCommandLayout = new QVBoxLayout(compileCommandGroup);
+    compileCommandLayout->setSpacing(10);
+
+    QLabel *compileCommandInfo = new QLabel(
+        tr("在这里管理附加到编译器命令行末尾的自定义参数，例如：-DLOCAL -pthread。\n"
+           "普通编译、编译运行、临时编译和临时编译运行都会使用“当前启用命令”。"));
+    compileCommandInfo->setWordWrap(true);
+    compileCommandInfo->setStyleSheet(
+        QString("QLabel { color: %1; font-size: 9pt; }").arg(infoTextColor));
+    compileCommandLayout->addWidget(compileCommandInfo);
+
+    QFormLayout *compileCommandForm = new QFormLayout;
+    compileCommandForm->setVerticalSpacing(10);
+
+    compileCommandCombo = new QComboBox;
+    compileCommandCombo->addItem(tr("不使用自定义编译命令"), QString());
+    for (const QString &command : customCompileCommands)
+    {
+        const QString trimmedCommand = command.trimmed();
+        if (!trimmedCommand.isEmpty() && compileCommandCombo->findData(trimmedCommand) < 0)
+        {
+            compileCommandCombo->addItem(trimmedCommand, trimmedCommand);
+        }
+    }
+
+    const QString normalizedCurrentCommand = currentCustomCompileCommand.trimmed();
+    int currentCommandIndex = compileCommandCombo->findData(normalizedCurrentCommand);
+    if (currentCommandIndex < 0 && !normalizedCurrentCommand.isEmpty())
+    {
+        compileCommandCombo->addItem(normalizedCurrentCommand, normalizedCurrentCommand);
+        currentCommandIndex = compileCommandCombo->count() - 1;
+    }
+    compileCommandCombo->setCurrentIndex(qMax(0, currentCommandIndex));
+    compileCommandForm->addRow(tr("当前启用命令:"), compileCommandCombo);
+
+    newCompileCommandEdit = new QLineEdit;
+    newCompileCommandEdit->setPlaceholderText(tr("例如：-DLOCAL -pthread"));
+    newCompileCommandEdit->installEventFilter(this);
+
+    QPushButton *addCompileCommandButton = new QPushButton(tr("新增"));
+    connect(addCompileCommandButton, &QPushButton::clicked,
+            this, &SettingsDialog::addCustomCompileCommand);
+
+    QHBoxLayout *newCompileCommandLayout = new QHBoxLayout;
+    newCompileCommandLayout->addWidget(newCompileCommandEdit, 1);
+    newCompileCommandLayout->addWidget(addCompileCommandButton);
+    compileCommandForm->addRow(tr("新增编译命令:"), newCompileCommandLayout);
+
+    QPushButton *removeCompileCommandButton = new QPushButton(tr("删除当前命令"));
+    connect(removeCompileCommandButton, &QPushButton::clicked,
+            this, &SettingsDialog::removeCustomCompileCommand);
+    compileCommandForm->addRow(QString(), removeCompileCommandButton);
+
+    compileCommandLayout->addLayout(compileCommandForm);
+
     compilerContentLayout->addWidget(compilerGroup);
     compilerContentLayout->addWidget(debuggerGroup);
+    compilerContentLayout->addWidget(compileCommandGroup);
     compilerContentLayout->addStretch();
 
     compilerScrollArea->setWidget(compilerContent);
     compilerPageLayout->addWidget(compilerScrollArea);
-
-    QWidget *editorPage = new QWidget;
+QWidget *editorPage = new QWidget;
     QVBoxLayout *editorPageLayout = new QVBoxLayout(editorPage);
     editorPageLayout->setContentsMargins(24, 24, 24, 24);
 
@@ -1281,6 +1369,17 @@ bool SettingsDialog::eventFilter(QObject *obj, QEvent *event)
             return true;
         }
     }
+
+    if (obj == newCompileCommandEdit && event->type() == QEvent::KeyPress)
+    {
+        QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
+        if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter)
+        {
+            addCustomCompileCommand();
+            return true;
+        }
+    }
+
     return QDialog::eventFilter(obj, event);
 }
 
@@ -1346,6 +1445,75 @@ void SettingsDialog::removeCustomCompletion()
     {
         delete customCompletionList->takeItem(customCompletionList->row(item));
     }
+}
+
+void SettingsDialog::addCustomCompileCommand()
+{
+    if (!compileCommandCombo || !newCompileCommandEdit)
+    {
+        return;
+    }
+
+    const QString command = newCompileCommandEdit->text().trimmed();
+    if (command.isEmpty())
+    {
+        return;
+    }
+
+    int existingIndex = compileCommandCombo->findData(command);
+    if (existingIndex < 0)
+    {
+        compileCommandCombo->addItem(command, command);
+        existingIndex = compileCommandCombo->count() - 1;
+    }
+
+    compileCommandCombo->setCurrentIndex(existingIndex);
+    newCompileCommandEdit->clear();
+}
+
+void SettingsDialog::removeCustomCompileCommand()
+{
+    if (!compileCommandCombo)
+    {
+        return;
+    }
+
+    const int index = compileCommandCombo->currentIndex();
+    if (index <= 0)
+    {
+        return;
+    }
+
+    compileCommandCombo->removeItem(index);
+    compileCommandCombo->setCurrentIndex(0);
+}
+
+QStringList SettingsDialog::getCustomCompileCommands() const
+{
+    QStringList commands;
+    if (!compileCommandCombo)
+    {
+        return commands;
+    }
+
+    for (int i = 1; i < compileCommandCombo->count(); ++i)
+    {
+        const QString command = compileCommandCombo->itemData(i).toString().trimmed();
+        if (!command.isEmpty() && !commands.contains(command))
+        {
+            commands.append(command);
+        }
+    }
+    return commands;
+}
+
+QString SettingsDialog::getCurrentCustomCompileCommand() const
+{
+    if (!compileCommandCombo || compileCommandCombo->currentIndex() <= 0)
+    {
+        return QString();
+    }
+    return compileCommandCombo->currentData().toString().trimmed();
 }
 
 QFont SettingsDialog::getEditorFont() const
@@ -1839,7 +2007,6 @@ void SplashScreen::paintEvent(QPaintEvent *event)
 class WelcomeDialog : public QDialog
 {
     Q_OBJECT
-
 public:
     explicit WelcomeDialog(QWidget *parent = nullptr);
     ~WelcomeDialog();
@@ -2782,6 +2949,29 @@ public:
     void beautifyCurrentLine();
     QString beautifyCode(const QString &code, bool isControlStructure);
 
+    struct DiagnosticInfo
+    {
+        enum Severity
+        {
+            Error,
+            Warning,
+            Info,
+            Hint
+        };
+
+        int startLine = -1;      // 1-based
+        int startColumn = -1;    // 0-based, -1 means unknown
+        int endLine = -1;        // 1-based
+        int endColumn = -1;      // 0-based, -1 means unknown
+        QString message;
+        QString source;
+        Severity severity = Hint;
+    };
+
+    void setBuildDiagnostics(const QList<DiagnosticInfo> &diagnostics);
+    void clearBuildDiagnostics();
+    void setLspDiagnostics(const QList<DiagnosticInfo> &diagnostics);
+
     void updateLineNumberAreaWidth(int newBlockCount);
 
     void setBreakpoints(const QSet<int> &lines);
@@ -2816,7 +3006,7 @@ public:
 
     void clearWarningLine()
     {
-        warningLine = -1;
+warningLine = -1;
         viewport()->update();
     }
     void setThemeMode(ThemeMode mode);
@@ -2827,8 +3017,8 @@ private:
     qreal blockTextPositionX(const QTextBlock &block, int characterOffset) const;
     qreal indentGuideX(const QTextBlock &block, int visualColumn) const;
     CodeCompleter *completer;
-    QListView *completionList;
-    QWidget *completionPopup;
+    QListView *completionList = nullptr;
+    QWidget *completionPopup = nullptr;
     QString completionPrefix;
     bool completionEnabled;
     bool ignoreNextKeyPress;
@@ -2978,6 +3168,108 @@ private:
     bool comp_disableAutoQuotes;
     bool comp_disableAutoIndent;
     QList<QTextEdit::ExtraSelection> lspDiagnosticSelections;
+    QList<QTextEdit::ExtraSelection> buildDiagnosticSelections;
+    QList<DiagnosticInfo> buildDiagnostics;
+    QList<DiagnosticInfo> lspDiagnostics;
+
+    class DiagnosticHoverFrame : public QFrame
+    {
+    public:
+        explicit DiagnosticHoverFrame(QWidget *parent = nullptr,
+                                      Qt::WindowFlags flags = Qt::WindowFlags())
+            : QFrame(parent, flags)
+        {
+            setAttribute(Qt::WA_TranslucentBackground, true);
+            setAttribute(Qt::WA_StyledBackground, false);
+        }
+
+        void setCardColors(const QColor &background,
+                           const QColor &border,
+                           const QColor &accent,
+                           const QColor &shadow)
+        {
+            m_background = background;
+            m_border = border;
+            m_accent = accent;
+            m_shadow = shadow;
+            update();
+        }
+
+    protected:
+        void paintEvent(QPaintEvent *event) override
+        {
+            Q_UNUSED(event);
+
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+
+            const qreal dpr = qMax<qreal>(1.0, devicePixelRatioF());
+            const qreal shadowInset = 9.0;
+            const qreal halfPixel = 0.5 / dpr;
+            QRectF cardRect = QRectF(rect()).adjusted(shadowInset, shadowInset,
+                                                       -shadowInset, -shadowInset);
+            cardRect.adjust(halfPixel, halfPixel, -halfPixel, -halfPixel);
+
+            // Draw the shadow inside this translucent top-level window. A graphics
+            // effect cannot paint outside a top-level window's client area and is
+            // unreliable for this use on Windows, so keep the shadow deterministic.
+            painter.setPen(Qt::NoPen);
+            for (int spread = 8; spread >= 1; --spread)
+            {
+                QColor layer = m_shadow;
+                layer.setAlpha(qMax(2, m_shadow.alpha() * (9 - spread) / 22));
+                painter.setBrush(layer);
+                QPainterPath shadowPath;
+                shadowPath.addRoundedRect(cardRect.adjusted(-spread, -spread, spread, spread),
+                                          11.0 + spread, 11.0 + spread);
+                painter.drawPath(shadowPath);
+            }
+
+            QPainterPath cardPath;
+            cardPath.addRoundedRect(cardRect, 11.0, 11.0);
+            painter.fillPath(cardPath, m_background);
+
+            QPen borderPen(m_border);
+            borderPen.setWidthF(qMax<qreal>(1.6, 1.6 / dpr));
+            painter.setPen(borderPen);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawPath(cardPath);
+
+            painter.save();
+            painter.setClipPath(cardPath);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(m_accent);
+            painter.drawRect(QRectF(cardRect.left(), cardRect.top(), 5.0, cardRect.height()));
+            painter.restore();
+        }
+
+    private:
+        QColor m_background = QColor("#252526");
+        QColor m_border = QColor("#747A84");
+        QColor m_accent = QColor("#4EC9B0");
+        QColor m_shadow = QColor(0, 0, 0, 150);
+    };
+
+    DiagnosticHoverFrame *diagnosticHoverPopup = nullptr;
+    QLabel *diagnosticHoverTitle = nullptr;
+    QLabel *diagnosticHoverSource = nullptr;
+    QLabel *diagnosticHoverMessage = nullptr;
+    QTimer *diagnosticHoverTimer = nullptr;
+    QPropertyAnimation *diagnosticHoverFadeAnimation = nullptr;
+    QString diagnosticHoverPendingKey;
+    QString diagnosticHoverVisibleKey;
+    DiagnosticInfo::Severity diagnosticHoverSeverity = DiagnosticInfo::Hint;
+    QByteArray diagnosticTrackedTextHash;
+
+    void ensureDiagnosticHoverPopup();
+    void hideDiagnosticHoverPopup();
+    void scheduleDiagnosticHover(const QList<DiagnosticInfo> &diagnostics, const QPoint &globalPos);
+    QString diagnosticHoverKey(const QList<DiagnosticInfo> &diagnostics) const;
+    void applyDiagnosticHoverTheme(DiagnosticInfo::Severity severity);
+    QList<DiagnosticInfo> diagnosticsAtViewportPoint(const QPoint &viewportPos) const;
+    QList<DiagnosticInfo> diagnosticsAtPosition(int line, int column) const;
+    void showDiagnosticHoverPopup(const QList<DiagnosticInfo> &diagnostics, const QPoint &globalPos);
+    void rebuildBuildDiagnosticSelections();
 
     void handleAutoBrackets(QKeyEvent *event);
     void handleAutoQuotes(QKeyEvent *event);
@@ -2993,6 +3285,8 @@ protected:
     void resizeEvent(QResizeEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
 
@@ -3040,15 +3334,99 @@ CodeEditor::CodeEditor(QWidget *parent)
 
     setLineWrapMode(QPlainTextEdit::NoWrap);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    setMouseTracking(true);
+    viewport()->setMouseTracking(true);
+    viewport()->setAttribute(Qt::WA_Hover, true);
+    viewport()->installEventFilter(this);
+
+    diagnosticHoverTimer = new QTimer(this);
+    diagnosticHoverTimer->setSingleShot(true);
+    diagnosticHoverTimer->setInterval(480);
+    connect(diagnosticHoverTimer, &QTimer::timeout, this, [this]()
+            {
+                if (!viewport() ||
+                    (completionPopup && completionPopup->isVisible()))
+                {
+                    hideDiagnosticHoverPopup();
+                    return;
+                }
+
+                // 延迟结束时必须重新读取“当前鼠标位置 + 当前诊断数据”。
+                // 不能复用 mouseMoveEvent 当时的诊断，否则 clangd 更新后可能
+                // 把上一个标识符（例如 d）的旧消息显示到新的标识符（例如 h）上。
+                const QPoint globalPos = QCursor::pos();
+                const QPoint viewportPos = viewport()->mapFromGlobal(globalPos);
+                if (!viewport()->rect().contains(viewportPos))
+                {
+                    hideDiagnosticHoverPopup();
+                    return;
+                }
+
+                const QList<DiagnosticInfo> diagnostics = diagnosticsAtViewportPoint(viewportPos);
+                if (diagnostics.isEmpty())
+                {
+                    hideDiagnosticHoverPopup();
+                    return;
+                }
+
+                diagnosticHoverPendingKey = diagnosticHoverKey(diagnostics);
+                showDiagnosticHoverPopup(diagnostics, globalPos);
+            });
 
     connect(this, &QPlainTextEdit::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
     connect(this, &QPlainTextEdit::updateRequest, this, &CodeEditor::updateLineNumberArea);
     connect(this, &QPlainTextEdit::cursorPositionChanged, this, &CodeEditor::highlightCurrentLine);
 
+    diagnosticTrackedTextHash = QCryptographicHash::hash(
+                                    toPlainText().toUtf8(),
+                                    QCryptographicHash::Sha1)
+                                    .toHex();
+
     connect(document(), &QTextDocument::contentsChanged, this, [this]()
             {
+                const QByteArray currentTextHash = QCryptographicHash::hash(
+                                                       toPlainText().toUtf8(),
+                                                       QCryptographicHash::Sha1)
+                                                       .toHex();
+
+                // QTextDocument::contentsChanged() also fires for formatting changes.
+                // Theme/font changes therefore MUST NOT invalidate diagnostics. Only a
+                // real plain-text change is allowed to clear them.
+                if (currentTextHash == diagnosticTrackedTextHash)
+                {
+                    return;
+                }
+                diagnosticTrackedTextHash = currentTextHash;
+
                 int currentLine = textCursor().blockNumber() + 1;
                 bool needUpdate = false;
+
+                // Actual text changed: old compiler/clangd ranges may no longer point
+                // at the same token, so invalidate them immediately.
+                setProperty("lspDiagnosticsDirty", true);
+
+                if (!buildDiagnostics.isEmpty() || !buildDiagnosticSelections.isEmpty())
+                {
+                    buildDiagnostics.clear();
+                    buildDiagnosticSelections.clear();
+                    needUpdate = true;
+                }
+
+                if (!lspDiagnostics.isEmpty() || !lspDiagnosticSelections.isEmpty())
+                {
+                    lspDiagnostics.clear();
+                    lspDiagnosticSelections.clear();
+                    needUpdate = true;
+                }
+
+                if (!m_errorLines.isEmpty() || !m_warningLines.isEmpty())
+                {
+                    m_errorLines.clear();
+                    m_warningLines.clear();
+                    updateMiniMapScrollBar();
+                }
+
+                hideDiagnosticHoverPopup();
 
                 if (errorLine > 0 && currentLine == errorLine)
                 {
@@ -3641,7 +4019,7 @@ void CodeEditor::MiniMapScrollBar::mouseMoveEvent(QMouseEvent *event)
     double trackHeight = qMax(1.0, (double)viewHeight - sliderHeight);
 
     int deltaY = event->pos().y() - m_dragStartY;
-    int newVal = m_dragStartValue + qRound((double)deltaY / trackHeight * range);
+int newVal = m_dragStartValue + qRound((double)deltaY / trackHeight * range);
     newVal = qBound(minVal, newVal, maxVal);
 
     vbar->setValue(newVal);
@@ -4052,7 +4430,7 @@ QString CodeEditor::beautifyCode(const QString &code, bool isControlStructure)
 
     for (const auto &match : commentMatches)
     {
-        protectedComments.prepend(match.captured());
+        protectedComments.append(match.captured());
         result.replace(match.capturedStart(), match.capturedLength(),
                        QString("__CMT_%1__").arg(protectedComments.size() - 1));
     }
@@ -4257,11 +4635,6 @@ QString CodeEditor::beautifyCode(const QString &code, bool isControlStructure)
         result.replace(QString("__COMPOP_%1__").arg(i), protectedCompoundOps[i]);
     }
 
-    for (int i = protectedTemplates.size() - 1; i >= 0; i--)
-    {
-        result.replace(QString("__TMPL_%1__").arg(i), protectedTemplates[i]);
-    }
-
     result.replace(QRegularExpression(",(?!\\s)"), ", ");
     result.replace(QRegularExpression(",\\s{2,}"), ", ");
 
@@ -4291,6 +4664,20 @@ QString CodeEditor::beautifyCode(const QString &code, bool isControlStructure)
 
     result.replace(QRegularExpression("([a-zA-Z0-9_)\\]\\}])\\s*\\*\\s*([a-zA-Z0-9_(\\[])"), "\\1 * \\2");
 
+    // Final multiplicative-operator normalization. Pointer declarations are still protected
+    // by __PTR_n__ placeholders here, so this only targets operand-to-operand operators.
+    result.replace(QRegularExpression(R"(([a-zA-Z0-9_)\]\}])\s*([*/%])\s*([a-zA-Z0-9_(\[]))"), "\\1 \\2 \\3");
+
+    for (int i = 0; i < protectedComments.size(); i++)
+    {
+        result.replace(QString("__CMT_%1__").arg(i), protectedComments[i]);
+    }
+
+    for (int i = protectedTemplates.size() - 1; i >= 0; i--)
+    {
+        result.replace(QString("__TMPL_%1__").arg(i), protectedTemplates[i]);
+    }
+
     for (int i = 0; i < protectedStrings.size(); i++)
     {
         result.replace(QString("__STR_%1__").arg(i), protectedStrings[i]);
@@ -4299,11 +4686,6 @@ QString CodeEditor::beautifyCode(const QString &code, bool isControlStructure)
     for (int i = 0; i < protectedPointers.size(); i++)
     {
         result.replace(protectedPointers[i], "*");
-    }
-
-    for (int i = 0; i < protectedComments.size(); i++)
-    {
-        result.replace(QString("__CMT_%1__").arg(i), protectedComments[i]);
     }
 
     return result;
@@ -4357,6 +4739,40 @@ void CodeEditor::beautifyCurrentLine()
 
 bool CodeEditor::eventFilter(QObject *obj, QEvent *event)
 {
+    // QPlainTextEdit inherits QAbstractScrollArea; mouse input is physically
+    // delivered to viewport().  Keep a viewport filter in addition to the
+    // remapped mouseMoveEvent() so hover diagnostics remain reliable across
+    // Qt/platform style changes.
+    if (obj == viewport())
+    {
+        if (event->type() == QEvent::MouseMove)
+        {
+            QMouseEvent *mouseEvent = static_cast<QMouseEvent *>(event);
+            if (mouseEvent->buttons() == Qt::NoButton &&
+                !(completionPopup && completionPopup->isVisible()))
+            {
+                const QPoint viewportPos = mouseEvent->position().toPoint();
+                const QList<DiagnosticInfo> diagnostics = diagnosticsAtViewportPoint(viewportPos);
+                if (!diagnostics.isEmpty())
+                {
+                    scheduleDiagnosticHover(diagnostics, mouseEvent->globalPosition().toPoint());
+                }
+                else
+                {
+                    hideDiagnosticHoverPopup();
+                }
+            }
+            else
+            {
+                hideDiagnosticHoverPopup();
+            }
+        }
+        else if (event->type() == QEvent::Leave)
+        {
+            hideDiagnosticHoverPopup();
+        }
+    }
+
     if (obj == completionList && completionPopup->isVisible())
     {
         if (event->type() == QEvent::KeyPress)
@@ -4500,6 +4916,19 @@ void CodeEditor::setThemeMode(ThemeMode mode)
 
     updateCompletionListStyle();
 
+    // 悬浮诊断卡片是独立的 Tool 顶层窗口，主题改变时不会自动继承
+    // 编辑器的样式，因此需要显式同步。
+    if (diagnosticHoverPopup)
+    {
+        applyDiagnosticHoverTheme(diagnosticHoverSeverity);
+        diagnosticHoverPopup->update();
+    }
+
+    // Theme/font formatting must not discard diagnostic ranges. Re-apply the
+    // existing selections so their wave underlines repaint immediately.
+    updateExtraSelections();
+    viewport()->update();
+
     const QList<CppHighlighter *> highlighters =
         document()->findChildren<CppHighlighter *>();
 
@@ -4624,7 +5053,7 @@ void CodeEditor::wheelEvent(QWheelEvent *event)
 
             int newSize = currentSize;
             if (angleDelta.y() > 0)
-            {
+{
                 newSize = qMin(currentSize + 1, 72);
             }
             else if (angleDelta.y() < 0)
@@ -4695,7 +5124,8 @@ int CodeEditor::lineNumberAreaWidth()
 
 void CodeEditor::updateLineNumberAreaWidth(int)
 {
-    setViewportMargins(lineNumberAreaWidth(), 0, 0, 0);
+    const int miniMapWidth = 18;
+    setViewportMargins(lineNumberAreaWidth(), 0, miniMapWidth, 0);
 }
 
 void CodeEditor::updateLineNumberArea(const QRect &rect, int dy)
@@ -4724,7 +5154,793 @@ void CodeEditor::setLspDiagnosticSelections(const QList<QTextEdit::ExtraSelectio
 void CodeEditor::clearLspDiagnosticSelections()
 {
     lspDiagnosticSelections.clear();
+    lspDiagnostics.clear();
+    hideDiagnosticHoverPopup();
     updateExtraSelections();
+}
+
+void CodeEditor::ensureDiagnosticHoverPopup()
+{
+    if (diagnosticHoverPopup)
+    {
+        return;
+    }
+
+    diagnosticHoverPopup = new DiagnosticHoverFrame(
+        this,
+        Qt::Tool | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint | Qt::WindowDoesNotAcceptFocus);
+    diagnosticHoverPopup->setObjectName("DiagnosticHoverPopup");
+    diagnosticHoverPopup->setAttribute(Qt::WA_ShowWithoutActivating, true);
+    diagnosticHoverPopup->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    diagnosticHoverPopup->setAttribute(Qt::WA_TranslucentBackground, true);
+    diagnosticHoverPopup->setFocusPolicy(Qt::NoFocus);
+
+    QVBoxLayout *layout = new QVBoxLayout(diagnosticHoverPopup);
+    // Reserve space for the manually painted shadow around the card.
+    layout->setContentsMargins(24, 21, 24, 22);
+    layout->setSpacing(7);
+
+    QHBoxLayout *headerLayout = new QHBoxLayout;
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(9);
+
+    diagnosticHoverTitle = new QLabel(diagnosticHoverPopup);
+    diagnosticHoverTitle->setObjectName("DiagnosticHoverTitle");
+
+    diagnosticHoverSource = new QLabel(diagnosticHoverPopup);
+    diagnosticHoverSource->setObjectName("DiagnosticHoverSource");
+    diagnosticHoverSource->setAlignment(Qt::AlignCenter);
+
+    headerLayout->addWidget(diagnosticHoverTitle);
+    headerLayout->addStretch();
+    headerLayout->addWidget(diagnosticHoverSource);
+
+    diagnosticHoverMessage = new QLabel(diagnosticHoverPopup);
+    diagnosticHoverMessage->setObjectName("DiagnosticHoverMessage");
+    diagnosticHoverMessage->setWordWrap(true);
+    diagnosticHoverMessage->setTextFormat(Qt::PlainText);
+    diagnosticHoverMessage->setTextInteractionFlags(Qt::NoTextInteraction);
+    diagnosticHoverMessage->setMaximumWidth(540);
+
+    layout->addLayout(headerLayout);
+    layout->addWidget(diagnosticHoverMessage);
+
+    // The card paints its own shadow inside the translucent window. This avoids
+    // top-level QGraphicsEffect clipping/visibility differences on Windows.
+
+    // 使用顶层窗口的 windowOpacity 做淡入，并保留一个最终可见状态兜底。
+    diagnosticHoverFadeAnimation = new QPropertyAnimation(diagnosticHoverPopup, "windowOpacity", diagnosticHoverPopup);
+    diagnosticHoverFadeAnimation->setDuration(175);
+    diagnosticHoverFadeAnimation->setEasingCurve(QEasingCurve::OutCubic);
+
+    applyDiagnosticHoverTheme(DiagnosticInfo::Hint);
+    diagnosticHoverPopup->hide();
+}
+
+void CodeEditor::hideDiagnosticHoverPopup()
+{
+    if (diagnosticHoverTimer && diagnosticHoverTimer->isActive())
+    {
+        diagnosticHoverTimer->stop();
+    }
+
+    if (diagnosticHoverFadeAnimation && diagnosticHoverFadeAnimation->state() == QAbstractAnimation::Running)
+    {
+        diagnosticHoverFadeAnimation->stop();
+    }
+
+    diagnosticHoverPendingKey.clear();
+    diagnosticHoverVisibleKey.clear();
+
+    if (diagnosticHoverPopup)
+    {
+        diagnosticHoverPopup->hide();
+        diagnosticHoverPopup->setWindowOpacity(1.0);
+    }
+}
+
+QString CodeEditor::diagnosticHoverKey(const QList<DiagnosticInfo> &diagnostics) const
+{
+    QStringList parts;
+    parts.reserve(diagnostics.size());
+
+    for (const DiagnosticInfo &info : diagnostics)
+    {
+        parts.append(QStringLiteral("%1|%2|%3|%4|%5|%6|%7")
+                         .arg(info.startLine)
+                         .arg(info.startColumn)
+                         .arg(info.endLine)
+                         .arg(info.endColumn)
+                         .arg(static_cast<int>(info.severity))
+                         .arg(info.source)
+                         .arg(info.message));
+    }
+
+    parts.sort(Qt::CaseSensitive);
+    return parts.join(QChar(0x001F));
+}
+
+void CodeEditor::scheduleDiagnosticHover(const QList<DiagnosticInfo> &diagnostics,
+                                         const QPoint &globalPos)
+{
+    if (diagnostics.isEmpty() || !diagnosticHoverTimer)
+    {
+        hideDiagnosticHoverPopup();
+        return;
+    }
+
+    const QString key = diagnosticHoverKey(diagnostics);
+
+    // 已经显示的是同一组诊断时，不因鼠标在同一个标识符内轻微移动而反复闪烁。
+    if (diagnosticHoverPopup && diagnosticHoverPopup->isVisible() &&
+        key == diagnosticHoverVisibleKey)
+    {
+        return;
+    }
+
+    // 同一诊断的延迟计时已经开始时，也不要因 1~2 像素移动重新计时。
+    if (diagnosticHoverTimer->isActive() && key == diagnosticHoverPendingKey)
+    {
+        Q_UNUSED(globalPos);
+        return;
+    }
+
+    if (diagnosticHoverPopup && diagnosticHoverPopup->isVisible())
+    {
+        if (diagnosticHoverFadeAnimation && diagnosticHoverFadeAnimation->state() == QAbstractAnimation::Running)
+        {
+            diagnosticHoverFadeAnimation->stop();
+        }
+        diagnosticHoverPopup->hide();
+        diagnosticHoverPopup->setWindowOpacity(1.0);
+        diagnosticHoverVisibleKey.clear();
+    }
+
+    diagnosticHoverTimer->stop();
+    diagnosticHoverPendingKey = key;
+    diagnosticHoverTimer->start();
+}
+
+void CodeEditor::applyDiagnosticHoverTheme(DiagnosticInfo::Severity severity)
+{
+    if (!diagnosticHoverPopup)
+    {
+        return;
+    }
+
+    diagnosticHoverSeverity = severity;
+
+    QString severityColor;
+    switch (severity)
+    {
+    case DiagnosticInfo::Error:
+        severityColor = QStringLiteral("#F14C4C");
+        break;
+    case DiagnosticInfo::Warning:
+        severityColor = QStringLiteral("#D7A600");
+        break;
+    case DiagnosticInfo::Info:
+        severityColor = QStringLiteral("#3794FF");
+        break;
+    case DiagnosticInfo::Hint:
+    default:
+        severityColor = QStringLiteral("#4EC9B0");
+        break;
+    }
+
+    QString background;
+    QString border;
+    QString messageColor;
+    QString sourceColor;
+    QString sourceBackground;
+    QString sourceBorder;
+
+    if (themeMode == ThemeMode::Dark)
+    {
+        background = QStringLiteral("#252526");
+        border = QStringLiteral("#747A84");
+        messageColor = QStringLiteral("#ECECEC");
+        sourceColor = QStringLiteral("#C9E6F7");
+        sourceBackground = QStringLiteral("#31343A");
+        sourceBorder = QStringLiteral("#4A4F57");
+    }
+    else if (themeMode == ThemeMode::EyeCare)
+    {
+        background = QStringLiteral("#FDF6E3");
+        border = QStringLiteral("#B49D60");
+        messageColor = QStringLiteral("#3B3A32");
+        sourceColor = QStringLiteral("#45624A");
+        sourceBackground = QStringLiteral("#EFE3C2");
+        sourceBorder = QStringLiteral("#C7B98E");
+    }
+    else
+    {
+        background = QStringLiteral("#FFFFFF");
+        border = QStringLiteral("#AEB8C4");
+        messageColor = QStringLiteral("#202124");
+        sourceColor = QStringLiteral("#005A9E");
+        sourceBackground = QStringLiteral("#F2F6FA");
+        sourceBorder = QStringLiteral("#D4DDE6");
+    }
+
+    const QColor shadowColor = themeMode == ThemeMode::Dark
+                                   ? QColor(0, 0, 0, 170)
+                                   : QColor(45, 50, 60, 105);
+
+    // Draw the card, border and shadow ourselves so the result is independent
+    // of native tooltip/window-manager painting.
+    diagnosticHoverPopup->setCardColors(QColor(background),
+                                         QColor(border),
+                                         QColor(severityColor),
+                                         shadowColor);
+
+    diagnosticHoverTitle->setStyleSheet(
+        QString("QLabel { color: %1; background: transparent; border: none; "
+                "font-weight: 700; font-size: 10.5pt; }")
+            .arg(severityColor));
+
+    diagnosticHoverMessage->setStyleSheet(
+        QString("QLabel { color: %1; background: transparent; border: none; "
+                "font-size: 9.5pt; padding-top: 1px; }")
+            .arg(messageColor));
+
+    diagnosticHoverSource->setStyleSheet(
+        QString("QLabel { color: %1; background-color: %2; border: 1px solid %3; "
+                "border-radius: 6px; padding: 2px 8px; font-size: 8.5pt; }")
+            .arg(sourceColor, sourceBackground, sourceBorder));
+
+    diagnosticHoverPopup->update();
+}
+
+QList<CodeEditor::DiagnosticInfo> CodeEditor::diagnosticsAtViewportPoint(const QPoint &viewportPos) const
+{
+    QList<DiagnosticInfo> result;
+    if (!viewport() || !viewport()->rect().contains(viewportPos))
+    {
+        return result;
+    }
+
+    // QPlainTextEdit::cursorForPosition() gives a QTextCursor, i.e. a position
+    // BETWEEN characters. That is unsuitable as a direct hit-test for a
+    // half-open diagnostic range [startColumn, endColumn): on the right half of
+    // a one-character token it can resolve to endColumn and miss completely.
+    // Use it only to locate the text block, then hit-test the diagnostic's
+    // actual painted x-range.
+    QTextCursor nearest = cursorForPosition(viewportPos);
+    if (nearest.isNull())
+    {
+        return result;
+    }
+
+    const QTextBlock block = nearest.block();
+    if (!block.isValid())
+    {
+        return result;
+    }
+
+    const QRectF blockRect = blockBoundingGeometry(block).translated(contentOffset());
+    if (viewportPos.y() < blockRect.top() || viewportPos.y() >= blockRect.bottom())
+    {
+        return result;
+    }
+
+    const int hoverLine = block.blockNumber() + 1;
+    const QString blockText = block.text();
+    const qreal mouseX = viewportPos.x();
+
+    auto appendUnique = [&result](const DiagnosticInfo &info)
+    {
+        for (const DiagnosticInfo &existing : result)
+        {
+            if (existing.message == info.message &&
+                existing.source == info.source &&
+                existing.severity == info.severity &&
+                existing.startLine == info.startLine &&
+                existing.startColumn == info.startColumn &&
+                existing.endLine == info.endLine &&
+                existing.endColumn == info.endColumn)
+            {
+                return;
+            }
+        }
+        result.append(info);
+    };
+
+    const auto isTokenChar = [](QChar c)
+    {
+        return c.isLetterOrNumber() || c == QLatin1Char('_');
+    };
+
+    auto hitDiagnostic = [&](const DiagnosticInfo &info, bool compilerDiagnostic) -> bool
+    {
+        const int startLine = info.startLine;
+        const int endLine = info.endLine > 0 ? info.endLine : startLine;
+        if (startLine <= 0 || hoverLine < startLine || hoverLine > endLine)
+        {
+            return false;
+        }
+
+        // If the compiler did not provide a column, limit the hover target to
+        // the painted text instead of the whole empty area to the right.
+        if (info.startColumn < 0)
+        {
+            if (hoverLine != startLine || blockText.isEmpty())
+            {
+                return false;
+            }
+            const qreal left = blockTextPositionX(block, 0) - 2.0;
+            const qreal right = blockTextPositionX(block, blockText.size()) + 2.0;
+            return mouseX >= qMin(left, right) && mouseX <= qMax(left, right);
+        }
+
+        int rangeStart = (hoverLine == startLine) ? info.startColumn : 0;
+        int rangeEnd = (hoverLine == endLine && info.endColumn >= 0)
+                           ? info.endColumn
+                           : blockText.size();
+
+        rangeStart = qBound(0, rangeStart, blockText.size());
+        rangeEnd = qBound(0, rangeEnd, blockText.size());
+        if (rangeEnd <= rangeStart)
+        {
+            rangeEnd = qMin(blockText.size(), rangeStart + 1);
+        }
+
+        // GCC/MSVC commonly provides only a single source column. Match the
+        // whole identifier token, consistent with the visual wave underline.
+        if (compilerDiagnostic && startLine == endLine &&
+            rangeEnd <= rangeStart + 1 && rangeStart < blockText.size() &&
+            isTokenChar(blockText.at(rangeStart)))
+        {
+            while (rangeStart > 0 && isTokenChar(blockText.at(rangeStart - 1)))
+            {
+                --rangeStart;
+            }
+            rangeEnd = qMax(rangeEnd, rangeStart + 1);
+            while (rangeEnd < blockText.size() && isTokenChar(blockText.at(rangeEnd)))
+            {
+                ++rangeEnd;
+            }
+        }
+
+        if (rangeStart >= blockText.size())
+        {
+            return false;
+        }
+
+        const qreal x1 = blockTextPositionX(block, rangeStart);
+        const qreal x2 = blockTextPositionX(block, rangeEnd);
+        const qreal left = qMin(x1, x2) - 2.0;
+        const qreal right = qMax(x1, x2) + 2.0;
+        return mouseX >= left && mouseX <= right;
+    };
+
+    for (const DiagnosticInfo &info : buildDiagnostics)
+    {
+        if (hitDiagnostic(info, true))
+        {
+            appendUnique(info);
+        }
+    }
+
+    for (const DiagnosticInfo &info : lspDiagnostics)
+    {
+        if (hitDiagnostic(info, false))
+        {
+            appendUnique(info);
+        }
+    }
+
+    return result;
+}
+
+QList<CodeEditor::DiagnosticInfo> CodeEditor::diagnosticsAtPosition(int line, int column) const
+{
+    QList<DiagnosticInfo> result;
+
+    auto appendUnique = [&result](const DiagnosticInfo &info)
+    {
+        for (const DiagnosticInfo &existing : result)
+        {
+            if (existing.message == info.message &&
+                existing.source == info.source &&
+                existing.severity == info.severity &&
+                existing.startLine == info.startLine &&
+                existing.startColumn == info.startColumn &&
+                existing.endLine == info.endLine &&
+                existing.endColumn == info.endColumn)
+            {
+                return;
+            }
+        }
+        result.append(info);
+    };
+
+    auto containsPosition = [](const DiagnosticInfo &info, int hoverLine, int hoverColumn) -> bool
+    {
+        const int startLine = info.startLine;
+        const int endLine = info.endLine > 0 ? info.endLine : startLine;
+        if (startLine <= 0 || hoverLine < startLine || hoverLine > endLine)
+        {
+            return false;
+        }
+
+        // 编译器没有给出列号时，只能退化为整行命中。
+        if (info.startColumn < 0)
+        {
+            return hoverLine == startLine;
+        }
+
+        if (startLine == endLine)
+        {
+            const int rangeEnd = info.endColumn > info.startColumn
+                                     ? info.endColumn
+                                     : info.startColumn + 1;
+            // LSP ranges are end-exclusive. Do not add a +/-1 tolerance here:
+            // adjacent diagnostics must never steal each other's message.
+            return hoverColumn >= info.startColumn && hoverColumn < rangeEnd;
+        }
+
+        if (hoverLine == startLine && hoverColumn < info.startColumn)
+        {
+            return false;
+        }
+        if (hoverLine == endLine && info.endColumn >= 0 && hoverColumn >= info.endColumn)
+        {
+            return false;
+        }
+        return true;
+    };
+
+    for (const DiagnosticInfo &info : buildDiagnostics)
+    {
+        bool matches = containsPosition(info, line, column);
+
+        // GCC/MSVC diagnostics commonly report only one source column. The
+        // visual underline is expanded to the token, so make hover use that same
+        // token extent instead of requiring the mouse to sit on one exact column.
+        if (!matches && info.startLine == line && info.startColumn >= 0 &&
+            info.endLine == info.startLine && info.endColumn == info.startColumn + 1)
+        {
+            QTextBlock block = document()->findBlockByNumber(line - 1);
+            if (block.isValid())
+            {
+                const QString text = block.text();
+                const auto isTokenChar = [](QChar c)
+                {
+                    return c.isLetterOrNumber() || c == QLatin1Char('_');
+                };
+
+                int left = qBound(0, info.startColumn, text.size());
+                int right = left;
+                if (left < text.size() && isTokenChar(text.at(left)))
+                {
+                    while (left > 0 && isTokenChar(text.at(left - 1)))
+                    {
+                        --left;
+                    }
+                    right = qMax(right + 1, info.startColumn + 1);
+                    while (right < text.size() && isTokenChar(text.at(right)))
+                    {
+                        ++right;
+                    }
+                    matches = column >= left && column < right;
+                }
+            }
+        }
+
+        if (matches)
+        {
+            appendUnique(info);
+        }
+    }
+
+    for (const DiagnosticInfo &info : lspDiagnostics)
+    {
+        if (containsPosition(info, line, column))
+        {
+            appendUnique(info);
+        }
+    }
+
+    return result;
+}
+
+void CodeEditor::showDiagnosticHoverPopup(const QList<DiagnosticInfo> &diagnostics,
+                                          const QPoint &globalPos)
+{
+    if (diagnostics.isEmpty())
+    {
+        hideDiagnosticHoverPopup();
+        return;
+    }
+
+    ensureDiagnosticHoverPopup();
+
+    DiagnosticInfo::Severity highestSeverity = DiagnosticInfo::Hint;
+    auto severityRank = [](DiagnosticInfo::Severity severity)
+    {
+        switch (severity)
+        {
+        case DiagnosticInfo::Error:
+            return 4;
+        case DiagnosticInfo::Warning:
+            return 3;
+        case DiagnosticInfo::Info:
+            return 2;
+        case DiagnosticInfo::Hint:
+        default:
+            return 1;
+        }
+    };
+
+    QStringList sources;
+    QStringList messages;
+    for (const DiagnosticInfo &info : diagnostics)
+    {
+        if (severityRank(info.severity) > severityRank(highestSeverity))
+        {
+            highestSeverity = info.severity;
+        }
+
+        const QString source = info.source.trimmed().isEmpty() ? tr("诊断") : info.source.trimmed();
+        if (!sources.contains(source))
+        {
+            sources.append(source);
+        }
+
+        QString message = info.message.trimmed();
+        if (message.isEmpty())
+        {
+            message = tr("未提供详细诊断信息");
+        }
+
+        if (!messages.contains(message))
+        {
+            messages.append(message);
+        }
+    }
+
+    QString severityText;
+    switch (highestSeverity)
+    {
+    case DiagnosticInfo::Error:
+        severityText = tr("错误");
+        break;
+    case DiagnosticInfo::Warning:
+        severityText = tr("警告");
+        break;
+    case DiagnosticInfo::Info:
+        severityText = tr("信息");
+        break;
+    case DiagnosticInfo::Hint:
+    default:
+        severityText = tr("提示");
+        break;
+    }
+
+    diagnosticHoverTitle->setText(
+        diagnostics.size() > 1
+            ? tr("%1 · %2 条诊断").arg(severityText).arg(diagnostics.size())
+            : severityText);
+    diagnosticHoverSource->setText(sources.join(QStringLiteral(" · ")));
+    diagnosticHoverMessage->setText(messages.join(QStringLiteral("\n\n")));
+
+    applyDiagnosticHoverTheme(highestSeverity);
+
+    diagnosticHoverPopup->adjustSize();
+    QSize popupSize = diagnosticHoverPopup->sizeHint().expandedTo(QSize(285, 0));
+    popupSize.setWidth(qMin(popupSize.width(), 580));
+    popupSize.setHeight(qMin(popupSize.height(), 330));
+    diagnosticHoverPopup->resize(popupSize);
+
+    QPoint popupPos = globalPos + QPoint(15, 21);
+    QScreen *screen = QGuiApplication::screenAt(globalPos);
+    if (!screen)
+    {
+        screen = QGuiApplication::primaryScreen();
+    }
+    if (screen)
+    {
+        const QRect available = screen->availableGeometry();
+        if (popupPos.x() + popupSize.width() > available.right())
+        {
+            popupPos.setX(qMax(available.left(), globalPos.x() - popupSize.width() - 15));
+        }
+        if (popupPos.y() + popupSize.height() > available.bottom())
+        {
+            popupPos.setY(qMax(available.top(), globalPos.y() - popupSize.height() - 15));
+        }
+    }
+
+    diagnosticHoverPopup->move(popupPos);
+    // Never start at absolute zero: on some Windows/Qt combinations an
+    // opacity-0 top-level tool window can fail to repaint when the animation
+    // begins. Keep it faintly visible, then fade to 1.0.
+    diagnosticHoverPopup->setWindowOpacity(0.08);
+    diagnosticHoverPopup->show();
+    diagnosticHoverPopup->raise();
+
+    diagnosticHoverVisibleKey = diagnosticHoverKey(diagnostics);
+    diagnosticHoverPendingKey.clear();
+
+    if (diagnosticHoverFadeAnimation)
+    {
+        diagnosticHoverFadeAnimation->stop();
+        diagnosticHoverFadeAnimation->setStartValue(0.08);
+        diagnosticHoverFadeAnimation->setEndValue(1.0);
+        diagnosticHoverFadeAnimation->start();
+
+        QPointer<DiagnosticHoverFrame> popupGuard(diagnosticHoverPopup);
+        QTimer::singleShot(230, diagnosticHoverPopup, [popupGuard]()
+                           {
+                               if (popupGuard && popupGuard->isVisible())
+                               {
+                                   // Visibility fallback if the platform did not advance
+                                   // windowOpacity animation for a tool window.
+                                   popupGuard->setWindowOpacity(1.0);
+                                   popupGuard->update();
+                               }
+                           });
+    }
+    else
+    {
+        diagnosticHoverPopup->setWindowOpacity(1.0);
+    }
+}
+
+void CodeEditor::rebuildBuildDiagnosticSelections()
+{
+    buildDiagnosticSelections.clear();
+
+    for (const DiagnosticInfo &info : buildDiagnostics)
+    {
+        if (info.startLine <= 0)
+        {
+            continue;
+        }
+
+        QTextBlock block = document()->findBlockByNumber(info.startLine - 1);
+        if (!block.isValid())
+        {
+            continue;
+        }
+
+        const QString blockText = block.text();
+        if (blockText.isEmpty())
+        {
+            continue;
+        }
+
+        int startColumn = info.startColumn;
+        if (startColumn < 0)
+        {
+            startColumn = 0;
+            while (startColumn < blockText.size() && blockText.at(startColumn).isSpace())
+            {
+                ++startColumn;
+            }
+        }
+        startColumn = qBound(0, startColumn, qMax(0, blockText.size() - 1));
+
+        int endColumn = -1;
+        if (info.endLine == info.startLine && info.endColumn > startColumn)
+        {
+            endColumn = qMin(info.endColumn, blockText.size());
+        }
+        else
+        {
+            endColumn = startColumn + 1;
+            const auto isTokenChar = [](QChar c)
+            {
+                return c.isLetterOrNumber() || c == QLatin1Char('_');
+            };
+
+            if (startColumn < blockText.size() && isTokenChar(blockText.at(startColumn)))
+            {
+                while (endColumn < blockText.size() && isTokenChar(blockText.at(endColumn)))
+                {
+                    ++endColumn;
+                }
+            }
+        }
+
+        endColumn = qBound(startColumn + 1, endColumn, blockText.size());
+
+        QTextCursor cursor(document());
+        cursor.setPosition(block.position() + startColumn);
+        cursor.setPosition(block.position() + endColumn, QTextCursor::KeepAnchor);
+
+        QTextEdit::ExtraSelection selection;
+        selection.cursor = cursor;
+        selection.format.setUnderlineStyle(QTextCharFormat::WaveUnderline);
+
+        switch (info.severity)
+        {
+        case DiagnosticInfo::Error:
+            selection.format.setUnderlineColor(QColor("#F14C4C"));
+            break;
+        case DiagnosticInfo::Warning:
+            selection.format.setUnderlineColor(QColor("#CCA700"));
+            break;
+        case DiagnosticInfo::Info:
+            selection.format.setUnderlineColor(QColor("#3794FF"));
+            break;
+        case DiagnosticInfo::Hint:
+        default:
+            selection.format.setUnderlineColor(QColor("#4EC9B0"));
+            break;
+        }
+
+        buildDiagnosticSelections.append(selection);
+    }
+}
+
+void CodeEditor::setBuildDiagnostics(const QList<DiagnosticInfo> &diagnostics)
+{
+    buildDiagnostics = diagnostics;
+    rebuildBuildDiagnosticSelections();
+    hideDiagnosticHoverPopup();
+    updateExtraSelections();
+
+    // 如果诊断到达时鼠标已经停在对应代码上，不要求用户再晃一下鼠标。
+    QTimer::singleShot(0, this, [this]()
+                       {
+                           if (!viewport())
+                           {
+                               return;
+                           }
+                           const QPoint globalPos = QCursor::pos();
+                           const QPoint viewportPos = viewport()->mapFromGlobal(globalPos);
+                           if (!viewport()->rect().contains(viewportPos))
+                           {
+                               return;
+                           }
+                           const QList<DiagnosticInfo> current = diagnosticsAtViewportPoint(viewportPos);
+                           if (!current.isEmpty())
+                           {
+                               scheduleDiagnosticHover(current, globalPos);
+                           }
+                       });
+}
+
+void CodeEditor::clearBuildDiagnostics()
+{
+    if (buildDiagnostics.isEmpty() && buildDiagnosticSelections.isEmpty())
+    {
+        return;
+    }
+
+    buildDiagnostics.clear();
+    buildDiagnosticSelections.clear();
+    hideDiagnosticHoverPopup();
+    updateExtraSelections();
+}
+
+void CodeEditor::setLspDiagnostics(const QList<DiagnosticInfo> &diagnostics)
+{
+    lspDiagnostics = diagnostics;
+    hideDiagnosticHoverPopup();
+
+    // clangd 是异步返回的：诊断更新时鼠标可能已经静止在问题代码上。
+    // 重新检查当前鼠标位置，让延迟悬浮窗仍能自然出现。
+    QTimer::singleShot(0, this, [this]()
+                       {
+                           if (!viewport())
+                           {
+                               return;
+                           }
+                           const QPoint globalPos = QCursor::pos();
+                           const QPoint viewportPos = viewport()->mapFromGlobal(globalPos);
+                           if (!viewport()->rect().contains(viewportPos))
+                           {
+                               return;
+                           }
+                           const QList<DiagnosticInfo> current = diagnosticsAtViewportPoint(viewportPos);
+                           if (!current.isEmpty())
+                           {
+                               scheduleDiagnosticHover(current, globalPos);
+                           }
+                       });
 }
 
 void CodeEditor::resizeEvent(QResizeEvent *event)
@@ -4734,22 +5950,16 @@ void CodeEditor::resizeEvent(QResizeEvent *event)
     int lineNumWidth = lineNumberAreaWidth();
     lineNumberArea->setGeometry(QRect(cr.left(), cr.top(), lineNumWidth, cr.height()));
 
-    int barWidth = 18;
-    QRect viewRect = viewport()->geometry();
-    int x = viewRect.right() - barWidth + 1;
-    int y = viewRect.top();
-    int w = barWidth;
-    int h = viewRect.height();
-    if (x < 0)
+    if (m_miniMap)
     {
-        x = 0;
+        const int barWidth = 18;
+        const QRect viewRect = viewport()->geometry();
+        const int x = viewRect.right() + 1;
+        const int y = viewRect.top();
+        const int h = viewRect.height();
+        m_miniMap->setGeometry(x, y, barWidth, h);
+        m_miniMap->raise();
     }
-    if (w > viewRect.width())
-    {
-        w = viewRect.width();
-    }
-    m_miniMap->setGeometry(x, y, w, h);
-    m_miniMap->raise();
 }
 
 bool CodeEditor::isPositionInCommentOrString() const
@@ -5014,7 +6224,7 @@ void CodeEditor::updateExtraSelections()
 
     if (currentDebugLine > 0)
     {
-        QTextBlock block = document()->findBlockByNumber(currentDebugLine - 1);
+QTextBlock block = document()->findBlockByNumber(currentDebugLine - 1);
         if (block.isValid())
         {
             QTextEdit::ExtraSelection debugSelection;
@@ -5027,6 +6237,7 @@ void CodeEditor::updateExtraSelections()
     }
 
     extraSelections.append(matchSelections);
+    extraSelections.append(buildDiagnosticSelections);
     extraSelections.append(lspDiagnosticSelections);
 
     setExtraSelections(extraSelections);
@@ -5134,6 +6345,8 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
 
 void CodeEditor::mousePressEvent(QMouseEvent *event)
 {
+    hideDiagnosticHoverPopup();
+
     if (completionPopup && completionPopup->isVisible())
     {
         QRect popupRect = completionPopup->geometry();
@@ -5148,6 +6361,34 @@ void CodeEditor::mousePressEvent(QMouseEvent *event)
     QPlainTextEdit::mousePressEvent(event);
 
     emit cursorPositionChanged();
+}
+
+void CodeEditor::mouseMoveEvent(QMouseEvent *event)
+{
+    QPlainTextEdit::mouseMoveEvent(event);
+
+    if (event->buttons() != Qt::NoButton ||
+        (completionPopup && completionPopup->isVisible()))
+    {
+        hideDiagnosticHoverPopup();
+        return;
+    }
+
+    const QList<DiagnosticInfo> diagnostics =
+        diagnosticsAtViewportPoint(event->position().toPoint());
+    if (!diagnostics.isEmpty())
+    {
+        scheduleDiagnosticHover(diagnostics, event->globalPosition().toPoint());
+        return;
+    }
+
+    hideDiagnosticHoverPopup();
+}
+
+void CodeEditor::leaveEvent(QEvent *event)
+{
+    hideDiagnosticHoverPopup();
+    QPlainTextEdit::leaveEvent(event);
 }
 
 void CodeEditor::paintEvent(QPaintEvent *event)
@@ -5297,24 +6538,28 @@ void CodeEditor::handleAutoBrackets(QKeyEvent *event)
     QChar key = event->text().isEmpty() ? QChar() : event->text().at(0);
     QTextCursor cursor = textCursor();
 
-    if (key == '(')
+    if (key == '(' || key == '[')
     {
         hideCompletion();
-        cursor.insertText("()");
-        cursor.movePosition(QTextCursor::Left);
-        setTextCursor(cursor);
-        event->accept();
-    }
-    else if (key == '[')
-    {
-        hideCompletion();
-        cursor.insertText("[]");
-        cursor.movePosition(QTextCursor::Left);
-        setTextCursor(cursor);
+
+        const QChar closing = (key == '(') ? QLatin1Char(')') : QLatin1Char(']');
+        if (cursor.hasSelection())
+        {
+            const QString selected = cursor.selectedText();
+            cursor.insertText(QString(key) + selected + QString(closing));
+            setTextCursor(cursor);
+        }
+        else
+        {
+            cursor.insertText(QString(key) + QString(closing));
+            cursor.movePosition(QTextCursor::Left);
+            setTextCursor(cursor);
+        }
         event->accept();
     }
     else if (key == '{')
     {
+        // Curly braces keep the existing indentation/beautification path in keyPressEvent().
         event->ignore();
     }
     else if (key == ')' || key == ']' || key == '}')
@@ -5411,30 +6656,37 @@ void CodeEditor::handleAutoBrackets(QKeyEvent *event)
 void CodeEditor::handleAutoQuotes(QKeyEvent *event)
 {
     QChar key = event->text().isEmpty() ? QChar() : event->text().at(0);
-    QTextCursor cursor = textCursor();
-
-    if (key == '\"')
-    {
-        hideCompletion();
-
-        cursor.insertText("\"\"");
-        cursor.movePosition(QTextCursor::Left);
-        setTextCursor(cursor);
-        event->accept();
-    }
-    else if (key == '\'')
-    {
-        hideCompletion();
-
-        cursor.insertText("''");
-        cursor.movePosition(QTextCursor::Left);
-        setTextCursor(cursor);
-        event->accept();
-    }
-    else
+    if (key != QLatin1Char('"') && key != QLatin1Char('\''))
     {
         event->ignore();
+        return;
     }
+
+    hideCompletion();
+    QTextCursor cursor = textCursor();
+
+    if (cursor.hasSelection())
+    {
+        const QString selected = cursor.selectedText();
+        cursor.insertText(QString(key) + selected + QString(key));
+        setTextCursor(cursor);
+        event->accept();
+        return;
+    }
+
+    // If an auto-inserted/typed quote already exists at the caret, move over it.
+    if (document()->characterAt(cursor.position()) == key)
+    {
+        cursor.movePosition(QTextCursor::Right);
+        setTextCursor(cursor);
+        event->accept();
+        return;
+    }
+
+    cursor.insertText(QString(key) + QString(key));
+    cursor.movePosition(QTextCursor::Left);
+    setTextCursor(cursor);
+    event->accept();
 }
 
 void CodeEditor::handleAutoIndent()
@@ -5525,6 +6777,9 @@ public:
         return selectedType == EasyXProject;
     }
 
+protected:
+    void showEvent(QShowEvent *event) override;
+
 private slots:
     void onCardClicked(FileType type);
     void onCreateClicked();
@@ -5568,6 +6823,32 @@ NewFileDialog::NewFileDialog(QWidget *parent)
 
 NewFileDialog::~NewFileDialog()
 {
+}
+
+void NewFileDialog::showEvent(QShowEvent *event)
+{
+    QDialog::showEvent(event);
+
+    QWidget *anchorWindow = parentWidget() ? parentWidget()->window() : nullptr;
+    QScreen *targetScreen = anchorWindow ? anchorWindow->screen() : screen();
+    if (!targetScreen)
+    {
+        targetScreen = QGuiApplication::primaryScreen();
+    }
+    if (!targetScreen)
+    {
+        return;
+    }
+
+    const QRect available = targetScreen->availableGeometry();
+    const QPoint center = (anchorWindow && anchorWindow->isVisible())
+                              ? anchorWindow->frameGeometry().center()
+                              : available.center();
+
+    QPoint topLeft(center.x() - width() / 2, center.y() - height() / 2);
+    topLeft.setX(qBound(available.left(), topLeft.x(), qMax(available.left(), available.right() - width() + 1)));
+    topLeft.setY(qBound(available.top(), topLeft.y(), qMax(available.top(), available.bottom() - height() + 1)));
+    move(topLeft);
 }
 
 void NewFileDialog::setupUI()
@@ -5936,7 +7217,6 @@ void NewFileDialog::onCardClicked(FileType type)
     updateCardSelection(selectedCard);
     createBtn->setEnabled(true);
 }
-
 void NewFileDialog::onCreateClicked()
 {
     if (selectedType != Cancelled)
@@ -6937,7 +8217,7 @@ void Debugger::parseCallStack(const QString &output)
     qDebug() << "=== 调用栈原始输出 ===" << output;
 
     int stackStart = output.indexOf("stack=[");
-    if (stackStart != -1)
+if (stackStart != -1)
     {
         int stackEnd = output.lastIndexOf("]");
         QString stackContent = output.mid(stackStart, stackEnd - stackStart + 1);
@@ -7414,6 +8694,8 @@ QString CodeEditor::getWordUnderCursor() const
 
 void CodeEditor::keyPressEvent(QKeyEvent *event)
 {
+    hideDiagnosticHoverPopup();
+
     if (event->key() == Qt::Key_BraceRight ||
         (!event->text().isEmpty() && event->text()[0] == '}'))
     {
@@ -7651,47 +8933,135 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
         }
     }
 
-    if (event->key() == Qt::Key_Tab && !(completionPopup && completionPopup->isVisible()))
+    if ((event->key() == Qt::Key_Tab || event->key() == Qt::Key_Backtab) &&
+        !(completionPopup && completionPopup->isVisible()))
     {
         QTextCursor cursor = textCursor();
+        const int safeIndentSize = qMax(1, indentSize);
+        const bool outdent = event->key() == Qt::Key_Backtab;
+
         if (cursor.hasSelection())
         {
-            int startPos = cursor.selectionStart();
-            int endPos = cursor.selectionEnd();
+            const int startPos = cursor.selectionStart();
+            const int endPos = cursor.selectionEnd();
 
-            cursor.setPosition(startPos);
-            int startBlock = cursor.blockNumber();
-            cursor.setPosition(endPos);
-            int endBlock = cursor.blockNumber();
-            if (endBlock < startBlock)
+            QTextCursor startCursor(document());
+            startCursor.setPosition(startPos);
+            int startBlock = startCursor.blockNumber();
+
+            QTextCursor endCursor(document());
+            endCursor.setPosition(endPos);
+            int endBlock = endCursor.blockNumber();
+            // A selection ending exactly at the next line's column 0 does not include that line.
+            if (endPos > startPos && endCursor.positionInBlock() == 0)
             {
-                std::swap(startBlock, endBlock);
+                --endBlock;
             }
-
-            int totalInserted = (endBlock - startBlock + 1) * indentSize;
+            endBlock = qMax(startBlock, endBlock);
 
             cursor.beginEditBlock();
-            for (int blockNum = endBlock; blockNum >= startBlock; --blockNum)
+            if (!outdent)
             {
-                QTextBlock block = document()->findBlockByNumber(blockNum);
-                if (block.isValid())
+                for (int blockNum = endBlock; blockNum >= startBlock; --blockNum)
                 {
-                    cursor.setPosition(block.position());
-                    cursor.insertText(QString(indentSize, ' '));
+                    QTextBlock block = document()->findBlockByNumber(blockNum);
+                    if (block.isValid())
+                    {
+                        cursor.setPosition(block.position());
+                        cursor.insertText(QString(safeIndentSize, QLatin1Char(' ')));
+                    }
+                }
+            }
+            else
+            {
+                for (int blockNum = endBlock; blockNum >= startBlock; --blockNum)
+                {
+                    QTextBlock block = document()->findBlockByNumber(blockNum);
+                    if (!block.isValid())
+                    {
+                        continue;
+                    }
+
+                    const QString blockText = block.text();
+                    int removeCount = 0;
+                    if (!blockText.isEmpty() && blockText.at(0) == QLatin1Char('\t'))
+                    {
+                        removeCount = 1;
+                    }
+                    else
+                    {
+                        while (removeCount < qMin(safeIndentSize, blockText.size()) &&
+                               blockText.at(removeCount) == QLatin1Char(' '))
+                        {
+                            ++removeCount;
+                        }
+                    }
+
+                    if (removeCount > 0)
+                    {
+                        cursor.setPosition(block.position());
+                        cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, removeCount);
+                        cursor.removeSelectedText();
+                    }
                 }
             }
             cursor.endEditBlock();
 
-            int newStartPos = startPos + indentSize;
-            int newEndPos = endPos + totalInserted;
-
-            cursor.setPosition(newStartPos);
-            cursor.setPosition(newEndPos, QTextCursor::KeepAnchor);
-            setTextCursor(cursor);
+            QTextBlock firstBlock = document()->findBlockByNumber(startBlock);
+            QTextBlock lastBlock = document()->findBlockByNumber(endBlock);
+            if (firstBlock.isValid() && lastBlock.isValid())
+            {
+                QTextCursor selection(document());
+                selection.setPosition(firstBlock.position());
+                selection.setPosition(lastBlock.position() + lastBlock.length() - 1, QTextCursor::KeepAnchor);
+                setTextCursor(selection);
+            }
 
             event->accept();
             return;
         }
+
+        if (outdent)
+        {
+            QTextBlock block = cursor.block();
+            const QString blockText = block.text();
+            int removeCount = 0;
+            if (!blockText.isEmpty() && blockText.at(0) == QLatin1Char('\t'))
+            {
+                removeCount = 1;
+            }
+            else
+            {
+                while (removeCount < qMin(safeIndentSize, blockText.size()) &&
+                       blockText.at(removeCount) == QLatin1Char(' '))
+                {
+                    ++removeCount;
+                }
+            }
+            if (removeCount > 0)
+            {
+                const int oldOffset = cursor.positionInBlock();
+                QTextCursor editCursor(block);
+                editCursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, removeCount);
+                editCursor.removeSelectedText();
+                cursor.setPosition(block.position() + qMax(0, oldOffset - removeCount));
+                setTextCursor(cursor);
+            }
+        }
+        else
+        {
+            const int column = cursor.positionInBlock();
+            int spaces = safeIndentSize - (column % safeIndentSize);
+            if (spaces <= 0)
+            {
+                spaces = safeIndentSize;
+            }
+            cursor.insertText(QString(spaces, QLatin1Char(' ')));
+            setTextCursor(cursor);
+        }
+
+        event->accept();
+        return;
     }
 
     if (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)
@@ -7735,6 +9105,33 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
     }
 
     QChar key = event->text().isEmpty() ? QChar() : event->text().at(0);
+
+    if (event->key() == Qt::Key_Backspace && !textCursor().hasSelection())
+    {
+        QTextCursor pairCursor = textCursor();
+        const int pos = pairCursor.position();
+        if (pos > 0)
+        {
+            const QChar left = document()->characterAt(pos - 1);
+            const QChar right = document()->characterAt(pos);
+            const bool isPair = (left == QLatin1Char('(') && right == QLatin1Char(')')) ||
+                                (left == QLatin1Char('[') && right == QLatin1Char(']')) ||
+                                (left == QLatin1Char('{') && right == QLatin1Char('}')) ||
+                                (left == QLatin1Char('"') && right == QLatin1Char('"')) ||
+                                (left == QLatin1Char('\'') && right == QLatin1Char('\''));
+            if (isPair)
+            {
+                pairCursor.beginEditBlock();
+                pairCursor.deleteChar();
+                pairCursor.deletePreviousChar();
+                pairCursor.endEditBlock();
+                setTextCursor(pairCursor);
+                hideCompletion();
+                event->accept();
+                return;
+            }
+        }
+    }
 
     bool shouldAutoBrackets = autoBrackets && !(competitionMode && comp_disableAutoBrackets);
     if (shouldAutoBrackets)
@@ -7820,7 +9217,7 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
                                     {
                                         depth++;
                                     }
-                                    else if (lineText[i] == ')')
+else if (lineText[i] == ')')
                                     {
                                         depth--;
                                         if (depth == 0)
@@ -8820,7 +10217,7 @@ private:
     }
 
     void readLoop()
-    {
+{
         QByteArray buffer;
         buffer.resize(16384);
 
@@ -9820,7 +11217,7 @@ void IntegratedTerminal::queueOrSend(const QString &text)
     }
 
     if (pty && pty->isRunning())
-    {
+{
         pty->writeText(text);
     }
     else
@@ -10820,7 +12217,7 @@ void ProjectManager::onFileClicked(const QModelIndex &index)
         }
 
         if (sample.startsWith("ID3") ||
-            sample.startsWith("OggS") ||
+sample.startsWith("OggS") ||
             sample.startsWith("fLaC"))
         {
             return false;
@@ -11820,7 +13217,7 @@ void UpdateManager::verifyAndInstall(const QString &filePath)
             {
                 progressDialog->close();
                 progressDialog->deleteLater();
-                progressDialog = nullptr;
+progressDialog = nullptr;
             }
 
             emit downloadFinished(false);
@@ -12820,8 +14217,7 @@ QString buildProblemHtml(const QString &fullTitle,
     QString infoHtml = QString(
                            "    <div class=\"info\">难度: %1 | 时间限制: %2 | 空间限制: %3</div>\n")
                            .arg(difficultyHtml, timeStr.toHtmlEscaped(), memoryStr.toHtmlEscaped());
-
-    QString htmlTemplate;
+QString htmlTemplate;
     htmlTemplate.reserve(90000 + bgJs.size() + descJs.size() + inJs.size() + outJs.size() + hintJs.size());
 
     auto appendLiteral = [&htmlTemplate](const char *text)
@@ -13789,6 +15185,7 @@ protected:
     void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
     void showEvent(QShowEvent *event) override;
+    QMenu *createPopupMenu() override;
 
 private:
     QStringList recentFiles;
@@ -13819,7 +15216,7 @@ private:
     bool warningVisible;
     HANDLE hProcess = NULL;
     QTabWidget *tabWidget = nullptr;
-    QPlainTextEdit *outputEdit = nullptr;
+QPlainTextEdit *outputEdit = nullptr;
     QTableWidget *errorTableWidget = nullptr;
     QDockWidget *outputDock = nullptr;
     QDockWidget *errorDock = nullptr;
@@ -13970,6 +15367,8 @@ private:
     QMap<QPair<QString, int>, QString> conditionalBreakpoints;
     QString optimizationLevel;
     QComboBox *optimizationCombo = nullptr;
+    QStringList customCompileCommands;
+    QString currentCustomCompileCommand;
     QMenu *errorTableContextMenu = nullptr;
     QAction *copyErrorAction = nullptr;
     bool pendingDebugAfterCompile = false;
@@ -14118,6 +15517,7 @@ private:
     void createToolBars();
     void createStatusBar();
     void createDockWindows();
+    void showBuildPanels(bool activateErrorPanel = false);
     void readSettings();
     void writeSettings();
     bool maybeSave();
@@ -14207,6 +15607,7 @@ private:
         }
         return qMakePair(functionStart, functionEnd);
     }
+    QString autoDetectCompilerPath();
     QString findDebuggerFromCompilerPath(const QString &compilerPath);
     QString autoDetectDebuggerPath();
     void createDebugDock();
@@ -14815,7 +16216,7 @@ CompilerIDE::CompilerIDE()
     aiDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     aiDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable);
     DeepSeekAssistantWidget *aiWidget = new DeepSeekAssistantWidget(aiDock);
-    aiDock->setWidget(aiWidget);
+aiDock->setWidget(aiWidget);
     aiDock->setVisible(false);
     addDockWidget(Qt::RightDockWidgetArea, aiDock);
 
@@ -15814,8 +17215,7 @@ bool CompilerIDE::testStandardSupport(const QString &standard)
     }
 
     QProcess process;
-
-    QString testProgram = R"(
+QString testProgram = R"(
         int main() { return 0; }
     )";
 
@@ -15865,7 +17265,15 @@ bool CompilerIDE::testStandardSupport(const QString &standard)
             }
         }
 
-        args << "-c" << tempFile.fileName() << "-o" << (tempFile.fileName() + ".o");
+        if (compilerType == "msvc")
+        {
+            args << "/nologo" << "/c" << tempFile.fileName()
+                 << ("/Fo" + tempFile.fileName() + ".obj");
+        }
+        else
+        {
+            args << "-c" << tempFile.fileName() << "-o" << (tempFile.fileName() + ".o");
+        }
 
         process.start(compilerPath, args);
 
@@ -15983,6 +17391,13 @@ void CompilerIDE::closeEvent(QCloseEvent *event)
 
         if (reply != QMessageBox::Yes)
         {
+            // A native modal dialog can occasionally disturb timer delivery on some systems.
+            // Re-arm the 1-second timer explicitly when the close operation is cancelled.
+            if (competitionTimer)
+            {
+                competitionTimer->stop();
+                competitionTimer->start(1000);
+            }
             event->ignore();
             return;
         }
@@ -16700,22 +18115,21 @@ void CompilerIDE::createDebugDock()
 
 void CompilerIDE::tempCompile()
 {
+    // 重复触发构建操作时只提示并立即返回：不得清空输出、错误列表，
+    // 也不得改变 Dock 可见性或中断当前任务。Starting 同样视为忙碌状态。
     if (m_isTempCompiling)
     {
         QMessageBox::warning(this, tr("提示"), tr("已有临时编译任务正在运行，请稍后..."));
         return;
     }
 
-    if (compileProcess && compileProcess->state() == QProcess::Running)
+    if (compileProcess && compileProcess->state() != QProcess::NotRunning)
     {
         QMessageBox::warning(this, tr("提示"), tr("已有编译任务正在运行，请稍后..."));
         return;
     }
 
-    if (outputDock)
-    {
-        outputDock->raise();
-    }
+    showBuildPanels(false);
 
     if (m_tempCompileProcess)
     {
@@ -16794,14 +18208,14 @@ void CompilerIDE::tempCompile()
     outputEdit->appendPlainText(tr("编译器: %1").arg(compilerPath));
     outputEdit->appendPlainText("");
 
-    if (!QFile::exists(compilerPath))
+    if (!isCompilerValid(compilerPath))
     {
         QString errorMsg = tr("编译器路径不存在: %1").arg(compilerPath);
         outputEdit->appendPlainText(errorMsg);
         accumulatedErrors.append(QString("0|0|%1").arg(errorMsg));
         updateErrorTable(accumulatedErrors, accumulatedWarnings);
         m_isTempCompiling = false;
-        return;
+return;
     }
 
     QStringList args;
@@ -16938,6 +18352,12 @@ void CompilerIDE::tempCompile()
         }
     }
 
+    const QString customCommand = currentCustomCompileCommand.trimmed();
+    if (!customCommand.isEmpty())
+    {
+        args.append(QProcess::splitCommand(customCommand));
+    }
+
     if (compileProcess)
     {
         compileProcess->kill();
@@ -17006,22 +18426,20 @@ void CompilerIDE::tempCompile()
 
 void CompilerIDE::tempCompileAndRun()
 {
+    // 与普通编译保持一致：重复点击只提示，不触碰现有输出和任务状态。
     if (m_isTempCompiling)
     {
         QMessageBox::warning(this, tr("提示"), tr("已有临时编译任务正在运行，请稍后..."));
         return;
     }
 
-    if (compileProcess && compileProcess->state() == QProcess::Running)
+    if (compileProcess && compileProcess->state() != QProcess::NotRunning)
     {
         QMessageBox::warning(this, tr("提示"), tr("已有编译任务正在运行，请稍后..."));
         return;
     }
 
-    if (outputDock)
-    {
-        outputDock->raise();
-    }
+    showBuildPanels(false);
 
     if (m_tempCompileProcess)
     {
@@ -17100,7 +18518,7 @@ void CompilerIDE::tempCompileAndRun()
     outputEdit->appendPlainText(tr("编译器: %1").arg(compilerPath));
     outputEdit->appendPlainText("");
 
-    if (!QFile::exists(compilerPath))
+    if (!isCompilerValid(compilerPath))
     {
         QString errorMsg = tr("编译器路径不存在: %1").arg(compilerPath);
         outputEdit->appendPlainText(errorMsg);
@@ -17241,6 +18659,12 @@ void CompilerIDE::tempCompileAndRun()
                  << "-luuid"
                  << "-lgdiplus";
         }
+    }
+
+    const QString customCommand = currentCustomCompileCommand.trimmed();
+    if (!customCommand.isEmpty())
+    {
+        args.append(QProcess::splitCommand(customCommand));
     }
 
     if (compileProcess)
@@ -17791,7 +19215,7 @@ void CompilerIDE::showEvent(QShowEvent *event)
                            this->unsetCursor();
 
                            CodeEditor *editor = currentEditor();
-                           if (editor)
+if (editor)
                            {
                                editor->setCursor(Qt::IBeamCursor);
                                qDebug() << "编辑器光标已设置为 IBeam";
@@ -18791,7 +20215,7 @@ void CompilerIDE::startDebugging(const QString &executable)
 
     if (!debugger->startDebugging(executable, curFile))
     {
-        QMessageBox::critical(this, tr("调试错误"),
+QMessageBox::critical(this, tr("调试错误"),
                               tr("无法启动调试器。请检查设置中的调试器路径。\n\n"
                                  "当前调试器路径: %1\n\n"
                                  "建议:\n"
@@ -18831,6 +20255,14 @@ void CompilerIDE::onVariableDoubleClicked(int row, int column)
     {
         debugger->setVariable(varName, newValue);
     }
+}
+
+QMenu *CompilerIDE::createPopupMenu()
+{
+    // Qt 默认实现会枚举所有 QDockWidget/QToolBar。右侧功能页已经被
+    // reparent 到统一侧边栏，原 DockWidget 因而没有内容；显示默认菜单
+    // 会让用户重新打开这些空 Dock。返回 nullptr 表示明确禁用该菜单。
+    return nullptr;
 }
 
 bool CompilerIDE::eventFilter(QObject *watched, QEvent *event)
@@ -19203,6 +20635,12 @@ void CompilerIDE::createActions()
 
 void CompilerIDE::createMenus()
 {
+    // QMainWindow 默认会在菜单栏/工具栏区域右键时生成一个 Dock/ToolBar
+    // 切换菜单。右侧功能已经统一迁移到 SideBarContainer，旧 Dock 只剩空壳，
+    // 继续暴露这些 toggleViewAction 会产生“空标签页”。这里直接阻止菜单栏
+    // 的右键上下文菜单，QMainWindow::createPopupMenu() 也会在下方返回 nullptr。
+    menuBar()->setContextMenuPolicy(Qt::PreventContextMenu);
+
     fileMenu = menuBar()->addMenu(tr("文件(&F)"));
     fileMenu->addAction(newAct);
     fileMenu->addAction(openAct);
@@ -19777,7 +21215,7 @@ void CompilerIDE::startCompetitionMode(bool countdown, int minutes,
     {
         outputEdit->appendPlainText(tr("  - DeepSeek AI 助手"));
     }
-    if (comp_disableAutoBrackets)
+if (comp_disableAutoBrackets)
     {
         outputEdit->appendPlainText(tr("  - 自动括号补全"));
     }
@@ -20458,6 +21896,67 @@ QString CompilerIDE::findDebuggerFromCompilerPath(const QString &compilerPath)
     return QString();
 }
 
+QString CompilerIDE::autoDetectCompilerPath()
+{
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QStringList candidates;
+#ifdef Q_OS_WIN
+    candidates << appDir + "/mingw/bin/g++.exe"
+               << appDir + "/mingw64/bin/g++.exe"
+               << appDir + "/TDM-GCC/bin/g++.exe"
+               << appDir + "/compiler/bin/g++.exe"
+               << "C:/MinGW/bin/g++.exe"
+               << "C:/mingw64/bin/g++.exe"
+               << "C:/mingw32/bin/g++.exe"
+               << "C:/msys64/ucrt64/bin/g++.exe"
+               << "C:/msys64/mingw64/bin/g++.exe"
+               << "C:/msys64/clang64/bin/clang++.exe"
+               << "C:/TDM-GCC-64/bin/g++.exe"
+               << "C:/TDM-GCC-32/bin/g++.exe";
+#else
+    candidates << appDir + "/mingw/bin/g++"
+               << "/usr/bin/g++"
+               << "/usr/local/bin/g++";
+#endif
+
+    for (const QString &candidate : candidates)
+    {
+        if (QFileInfo::exists(candidate) && QFileInfo(candidate).isFile())
+        {
+            return QDir::toNativeSeparators(QFileInfo(candidate).absoluteFilePath());
+        }
+    }
+
+#ifdef Q_OS_WIN
+    const QStringList executableNames = {"g++.exe", "clang++.exe", "cl.exe"};
+#else
+    const QStringList executableNames = {"g++", "clang++", "c++"};
+#endif
+    for (const QString &name : executableNames)
+    {
+        const QString found = QStandardPaths::findExecutable(name);
+        if (!found.isEmpty())
+        {
+            return QDir::toNativeSeparators(QFileInfo(found).absoluteFilePath());
+        }
+    }
+
+    // As a final bounded fallback, look only under the application directory.
+#ifdef Q_OS_WIN
+    QDirIterator it(appDir, QStringList() << "g++.exe" << "clang++.exe" << "cl.exe",
+                    QDir::Files, QDirIterator::Subdirectories);
+#else
+    QDirIterator it(appDir, QStringList() << "g++" << "clang++" << "c++",
+                    QDir::Files, QDirIterator::Subdirectories);
+#endif
+    if (it.hasNext())
+    {
+        return QDir::toNativeSeparators(QFileInfo(it.next()).absoluteFilePath());
+    }
+
+    return QString();
+}
+
 QString CompilerIDE::autoDetectDebuggerPath()
 {
     QString detectedPath = findDebuggerFromCompilerPath(compilerPath);
@@ -20716,7 +22215,7 @@ void CompilerIDE::createDockWindows()
         errorTableWidget->horizontalHeader()->setStyleSheet(
             "QHeaderView::section {"
             "    background-color: #2D3047;"
-            "    color: #E0E0E0;"
+"    color: #E0E0E0;"
             "    padding: 4px;"
             "    border: 1px solid #5A5F7A;"
             "}");
@@ -20779,6 +22278,28 @@ void CompilerIDE::createDockWindows()
         qWarning() << "viewMenu is not initialized!";
     }
 }
+
+void CompilerIDE::showBuildPanels(bool activateErrorPanel)
+{
+    if (errorDock)
+    {
+        errorDock->show();
+    }
+    if (outputDock)
+    {
+        outputDock->show();
+    }
+
+    if (activateErrorPanel && errorDock)
+    {
+        errorDock->raise();
+    }
+    else if (outputDock)
+    {
+        outputDock->raise();
+    }
+}
+
 
 void CompilerIDE::createFindDialog()
 {
@@ -20997,6 +22518,8 @@ void CompilerIDE::writeSettings()
     settings.setValue("recentFiles", recentFiles);
     settings.setValue("cppStandard", cppStandard);
     settings.setValue("optimizationLevel", optimizationLevel);
+    settings.setValue("customCompileCommands", customCompileCommands);
+    settings.setValue("currentCustomCompileCommand", currentCustomCompileCommand.trimmed());
 
     qDebug() << "设置已保存 - 编译器路径:" << compilerPath;
     qDebug() << "调试器路径:" << debuggerPath;
@@ -21012,17 +22535,22 @@ void CompilerIDE::readSettings()
     resize(size);
     move(pos);
 
-    QString savedCompilerPath = settings.value("compilerPath", "").toString();
-
-    if (!savedCompilerPath.isEmpty() && QFile::exists(savedCompilerPath))
+    QString savedCompilerPath = settings.value("compilerPath", "").toString().trimmed();
+    QString resolvedSavedCompiler = savedCompilerPath;
+    if (!resolvedSavedCompiler.isEmpty() && !QFileInfo::exists(resolvedSavedCompiler))
     {
-        compilerPath = savedCompilerPath;
+        resolvedSavedCompiler = QStandardPaths::findExecutable(resolvedSavedCompiler);
+    }
+
+    if (!resolvedSavedCompiler.isEmpty() && QFileInfo::exists(resolvedSavedCompiler))
+    {
+        compilerPath = QDir::toNativeSeparators(QFileInfo(resolvedSavedCompiler).absoluteFilePath());
         qDebug() << "使用用户保存的编译器路径:" << compilerPath;
     }
     else
     {
-        QString installedCompilerPath = "";
-        QString configPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/compiler_path.conf";
+        QString installedCompilerPath;
+        const QString configPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/compiler_path.conf";
         QFile configFile(configPath);
         if (configFile.open(QIODevice::ReadOnly | QIODevice::Text))
         {
@@ -21030,24 +22558,33 @@ void CompilerIDE::readSettings()
             installedCompilerPath = in.readLine().trimmed();
             configFile.close();
         }
-        if (installedCompilerPath.isEmpty() || !QFile::exists(installedCompilerPath))
+
+        if (!installedCompilerPath.isEmpty() && !QFileInfo::exists(installedCompilerPath))
         {
-            QString defaultPath = QCoreApplication::applicationDirPath() + "/mingw/bin/g++.exe";
-            if (QFile::exists(defaultPath))
+            const QString resolved = QStandardPaths::findExecutable(installedCompilerPath);
+            if (!resolved.isEmpty())
             {
-                installedCompilerPath = defaultPath;
+                installedCompilerPath = resolved;
             }
         }
-        if (installedCompilerPath.isEmpty() || !QFile::exists(installedCompilerPath))
+
+        if (installedCompilerPath.isEmpty() || !QFileInfo::exists(installedCompilerPath))
         {
-#ifdef Q_OS_WIN
-            installedCompilerPath = "g++.exe";
-#else
-            installedCompilerPath = "g++";
-#endif
+            installedCompilerPath = autoDetectCompilerPath();
         }
 
-        compilerPath = installedCompilerPath;
+        if (!installedCompilerPath.isEmpty())
+        {
+            compilerPath = QDir::toNativeSeparators(QFileInfo(installedCompilerPath).absoluteFilePath());
+        }
+        else
+        {
+#ifdef Q_OS_WIN
+            compilerPath = "g++.exe";
+#else
+            compilerPath = "g++";
+#endif
+        }
         qDebug() << "使用自动检测的编译器路径:" << compilerPath;
     }
 
@@ -21116,6 +22653,23 @@ void CompilerIDE::readSettings()
     {
         optimizationCombo->setCurrentIndex(optIndex);
     }
+
+    customCompileCommands = settings.value("customCompileCommands", QStringList()).toStringList();
+    for (QString &command : customCompileCommands)
+    {
+        command = command.trimmed();
+    }
+    customCompileCommands.removeAll(QString());
+    customCompileCommands.removeDuplicates();
+
+    currentCustomCompileCommand =
+        settings.value("currentCustomCompileCommand", QString()).toString().trimmed();
+    if (!currentCustomCompileCommand.isEmpty() &&
+        !customCompileCommands.contains(currentCustomCompileCommand))
+    {
+        customCompileCommands.append(currentCustomCompileCommand);
+    }
+
     setTheme(themeMode);
     compilerType = detectCompilerType(compilerPath);
     checkCompilerSupport();
@@ -21661,7 +23215,7 @@ void CompilerIDE::sendCompetitiveCompanionHttpResponse(QTcpSocket *socket,
         reason = "Length Required";
         break;
     case 413:
-        reason = "Payload Too Large";
+reason = "Payload Too Large";
         break;
     case 431:
         reason = "Request Header Fields Too Large";
@@ -22661,8 +24215,7 @@ void CompilerIDE::importSamplesIntoTester(
     {
         testCasesScrollArea->setUpdatesEnabled(false);
     }
-
-    clearSampleTesterCases();
+clearSampleTesterCases();
 
     for (const auto &sample : samples)
     {
@@ -23661,7 +25214,7 @@ void CompilerIDE::silentCompileForTest()
     if (!QFile::exists(compilerPath))
     {
         QString errorMsg = tr("编译器路径不存在: %1").arg(compilerPath);
-        outputEdit->appendPlainText(errorMsg);
+outputEdit->appendPlainText(errorMsg);
         accumulatedErrors.append(QString("0|0|%1").arg(errorMsg));
         updateErrorTable(accumulatedErrors, accumulatedWarnings);
 
@@ -24661,7 +26214,7 @@ void CompilerIDE::loadFile(const QString &fileName)
             {
                 hasHighBytes = true;
                 if (i + 3 >= len)
-                {
+{
                     return false;
                 }
                 if ((bytes[i + 1] & 0xC0) != 0x80)
@@ -25309,24 +26862,39 @@ bool CompilerIDE::saveFile(const QString &fileName)
     qDebug() << "配置键:" << fileKey;
 
     statusBar()->showMessage(tr("文件已保存"), 2000);
-    if (m_lspAvailable && m_editorUris.contains(editor))
+
+    const QString dir = QFileInfo(fileName).absolutePath();
+    ensureCompileFlags(dir, isEasyX);
+
+    if (m_lspAvailable && m_lspClient)
     {
-        QString oldUri = m_editorUris[editor];
-        QString newUri = QUrl::fromLocalFile(fileName).toString();
-        if (oldUri != newUri)
+        const QString newUri = QUrl::fromLocalFile(fileName).toString();
+        const QString oldUri = m_editorUris.value(editor);
+        if (!oldUri.isEmpty() && oldUri != newUri)
         {
             m_lspClient->closeDocument(oldUri);
-            m_editorUris[editor] = newUri;
-            m_lspClient->openDocument(newUri, editor->toPlainText());
-            QString oldPath = QUrl(oldUri).toLocalFile();
+            m_editorUris.remove(editor);
+            m_editorVersions.remove(editor);
+            editor->setProperty("lspLastTextHash", QByteArray());
+
+            const QString oldPath = QUrl(oldUri).toLocalFile();
             if (oldPath.startsWith(QDir::temp().absolutePath()))
             {
                 QFile::remove(oldPath);
             }
+
+            // sendOpenToLSP waits for this directory's compile flags/meta to become ready.
+            sendOpenToLSP(editor, fileName);
+        }
+        else if (oldUri == newUri)
+        {
+            sendChangeToLSP(editor);
+        }
+        else
+        {
+            sendOpenToLSP(editor, fileName);
         }
     }
-    QString dir = QFileInfo(fileName).absolutePath();
-    ensureCompileFlags(dir, isEasyX);
     return true;
 }
 
@@ -25557,6 +27125,7 @@ void CompilerIDE::showTemplateSettings()
     normalLabel->setStyleSheet("font-weight: bold; margin-bottom: 5px;");
 
     QTextEdit *normalEdit = new QTextEdit;
+    normalEdit->setAcceptRichText(false);
     normalEdit->setPlainText(defaultNormalTemplate);
     normalEdit->setFont(QFont("Consolas", 10));
     normalEdit->setLineWrapMode(QTextEdit::NoWrap);
@@ -25572,6 +27141,7 @@ void CompilerIDE::showTemplateSettings()
     easyxLabel->setStyleSheet("font-weight: bold; margin-bottom: 5px;");
 
     QTextEdit *easyxEdit = new QTextEdit;
+    easyxEdit->setAcceptRichText(false);
     easyxEdit->setPlainText(defaultEasyXTemplate);
     easyxEdit->setFont(QFont("Consolas", 10));
     easyxEdit->setLineWrapMode(QTextEdit::NoWrap);
@@ -25644,8 +27214,7 @@ void CompilerIDE::showTemplateSettings()
             });
 
     connect(buttonBox, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
-
-    dialog->exec();
+dialog->exec();
 }
 
 void CompilerIDE::open()
@@ -26158,6 +27727,13 @@ void CompilerIDE::documentWasModified()
 
         if (currentHash != lastHash)
         {
+            // Reserve the next LSP version immediately, before the 300 ms debounce.
+            // Otherwise an old publishDiagnostics can arrive in this gap and be
+            // mistaken for diagnostics belonging to the newly edited text.
+            const int nextVersion = m_editorVersions.value(editor, 1) + 1;
+            editor->setProperty("lspExpectedDiagnosticsVersion", nextVersion);
+            editor->setProperty("lspDiagnosticsDirty", true);
+
             m_pendingLSPEditor = editor;
 
             if (m_lspDebounceTimer)
@@ -26301,6 +27877,28 @@ QString CompilerIDE::detectFileEncoding(const QString &filePath)
 
 void CompilerIDE::compile()
 {
+    // 必须在任何 UI/诊断/输出修改之前判断任务占用。重复点击应被完全忽略，
+    // 除了给出提示之外，不清空输出、不清除错误标记、不切换 Dock。
+    if (m_isTempCompiling)
+    {
+        QMessageBox::warning(this, tr("提示"), tr("已有临时编译任务正在运行，请稍后..."));
+        return;
+    }
+
+    if (compileProcess && compileProcess->state() != QProcess::NotRunning)
+    {
+        QMessageBox::warning(this, tr("提示"), tr("已有编译任务正在运行，请稍后..."));
+        return;
+    }
+
+    if (compileProcess)
+    {
+        compileProcess->disconnect();
+        compileProcess->deleteLater();
+        compileProcess = nullptr;
+    }
+
+    showBuildPanels(false);
     for (int i = 0; i < tabWidget->count(); ++i)
     {
         CodeEditor *editor = editorAt(i);
@@ -26311,29 +27909,13 @@ void CompilerIDE::compile()
         }
     }
 
-    if (compileProcess)
-    {
-        if (compileProcess->state() == QProcess::Running)
-        {
-            resetOutputFormat();
-            QMessageBox::warning(this, tr("提示"), tr("已有临时编译任务正在运行，请稍后..."));
-            return;
-        }
-        else
-        {
-            compileProcess->disconnect();
-            compileProcess->deleteLater();
-            compileProcess = nullptr;
-        }
-    }
-
     CodeEditor *editor = currentEditor();
     if (!editor)
     {
         return;
     }
 
-    if (!QFile::exists(compilerPath))
+    if (!isCompilerValid(compilerPath))
     {
         QString errorMsg = tr("编译器路径不存在: %1").arg(compilerPath);
         resetOutputFormat();
@@ -26344,7 +27926,16 @@ void CompilerIDE::compile()
     }
 
     QProcess testProcess;
-    testProcess.start(compilerPath, QStringList() << "--version");
+    QStringList compilerProbeArgs;
+    if (compilerType == "msvc")
+    {
+        compilerProbeArgs << "/?";
+    }
+    else
+    {
+        compilerProbeArgs << "--version";
+    }
+    testProcess.start(compilerPath, compilerProbeArgs);
     if (!testProcess.waitForFinished(3000) || testProcess.exitCode() != 0)
     {
         QString errorMsg = tr("编译器不可用或路径错误: %1").arg(compilerPath);
@@ -26464,10 +28055,6 @@ void CompilerIDE::compile()
 
     outputEdit->clear();
 
-    if (outputDock)
-    {
-        outputDock->raise();
-    }
 
     QTextCursor cursor = outputEdit->textCursor();
     cursor.movePosition(QTextCursor::Start);
@@ -26621,7 +28208,12 @@ void CompilerIDE::compile()
         }
     }
 
-    if (compileProcess)
+    const QString customCommand = currentCustomCompileCommand.trimmed();
+    if (!customCommand.isEmpty())
+    {
+        args.append(QProcess::splitCommand(customCommand));
+    }
+if (compileProcess)
     {
         compileProcess->kill();
         compileProcess->waitForFinished();
@@ -26873,14 +28465,11 @@ void CompilerIDE::runExecutable(const QString &programPath, bool isAfterCompile)
 
 void CompilerIDE::run()
 {
+    showBuildPanels(false);
     resetOutputFormat();
 
     outputEdit->clear();
 
-    if (outputDock)
-    {
-        outputDock->raise();
-    }
 
     if (errorTableWidget)
     {
@@ -26999,6 +28588,22 @@ void CompilerIDE::run()
 
 void CompilerIDE::compileAndRun()
 {
+    // compileAndRun 原先会先清空输出、清错误并终止运行中的程序，然后才由
+    // compile() 检查是否已有构建任务。这会导致“虽然忽略了重复编译，但输出已经丢失”。
+    // 因此占用检查必须放在所有副作用之前。
+    if (m_isTempCompiling)
+    {
+        QMessageBox::warning(this, tr("提示"), tr("已有临时编译任务正在运行，请稍后..."));
+        return;
+    }
+
+    if (compileProcess && compileProcess->state() != QProcess::NotRunning)
+    {
+        QMessageBox::warning(this, tr("提示"), tr("已有编译任务正在运行，请稍后..."));
+        return;
+    }
+
+    showBuildPanels(false);
     if (hRunningProcess != NULL)
     {
         TerminateProcess(hRunningProcess, 0);
@@ -27017,10 +28622,6 @@ void CompilerIDE::compileAndRun()
 
     outputEdit->clear();
 
-    if (outputDock)
-    {
-        outputDock->raise();
-    }
 
     accumulatedErrors.clear();
     accumulatedWarnings.clear();
@@ -27352,6 +28953,152 @@ void CompilerIDE::updateErrorTable(const QStringList &errors, const QStringList 
 
     errorTableWidget->setRowCount(0);
 
+    // 错误表代表“当前这一轮编译诊断”。只有真正调用 updateErrorTable()
+    // 时才更新这些悬浮诊断；重复点击编译被提前 return，因此不会清掉上一轮信息。
+    for (int i = 0; i < tabWidget->count(); ++i)
+    {
+        if (CodeEditor *editor = editorAt(i))
+        {
+            editor->clearBuildDiagnostics();
+        }
+    }
+
+    QMap<CodeEditor *, QList<CodeEditor::DiagnosticInfo>> buildHoverDiagnostics;
+
+    auto normalizedDiagnosticPath = [](const QString &path) -> QString
+    {
+        QString value = QDir::fromNativeSeparators(path.trimmed());
+        if (value.isEmpty())
+        {
+            return QString();
+        }
+
+        QFileInfo info(value);
+        if (info.isAbsolute())
+        {
+            return QDir::cleanPath(info.absoluteFilePath());
+        }
+        return QDir::cleanPath(value);
+    };
+
+    auto resolveDiagnosticEditor = [this, &normalizedDiagnosticPath](const QString &filePath) -> CodeEditor *
+    {
+        const QString normalized = normalizedDiagnosticPath(filePath);
+        const QString diagnosticName = QFileInfo(filePath).fileName();
+
+        const QString normalizedCurrent = normalizedDiagnosticPath(curFile);
+        const QString normalizedTemp = normalizedDiagnosticPath(tempSourceFile);
+
+        if (!normalized.isEmpty())
+        {
+            if (!normalizedTemp.isEmpty() &&
+                normalized.compare(normalizedTemp, Qt::CaseInsensitive) == 0)
+            {
+                return currentEditor();
+            }
+
+            if (!normalizedCurrent.isEmpty() &&
+                normalized.compare(normalizedCurrent, Qt::CaseInsensitive) == 0)
+            {
+                return currentEditor();
+            }
+        }
+
+        for (int i = 0; i < tabWidget->count(); ++i)
+        {
+            CodeEditor *editor = editorAt(i);
+            if (!editor)
+            {
+                continue;
+            }
+
+            const QString tabPath = tabWidget->tabToolTip(i);
+            const QString normalizedTab = normalizedDiagnosticPath(tabPath);
+            if (!normalized.isEmpty() && !normalizedTab.isEmpty() &&
+                normalized.compare(normalizedTab, Qt::CaseInsensitive) == 0)
+            {
+                return editor;
+            }
+        }
+
+        // 某些 GCC/MSVC 输出相对路径，或者中文路径编译时输出的是临时目录。
+        // 精确路径匹配失败后仅在文件名唯一时回退，避免把头文件错误塞给错误的标签页。
+        if (!diagnosticName.isEmpty())
+        {
+            CodeEditor *nameMatch = nullptr;
+            int matches = 0;
+            for (int i = 0; i < tabWidget->count(); ++i)
+            {
+                const QString tabPath = tabWidget->tabToolTip(i);
+                QString tabName = QFileInfo(tabPath).fileName();
+                if (tabName.isEmpty())
+                {
+                    tabName = tabWidget->tabText(i);
+                    if (tabName.endsWith('*'))
+                    {
+                        tabName.chop(1);
+                    }
+                }
+
+                if (tabName.compare(diagnosticName, Qt::CaseInsensitive) == 0)
+                {
+                    nameMatch = editorAt(i);
+                    ++matches;
+                }
+            }
+            if (matches == 1)
+            {
+                return nameMatch;
+            }
+        }
+
+        return nullptr;
+    };
+
+    auto registerBuildDiagnostic =
+        [this, &buildHoverDiagnostics, &resolveDiagnosticEditor](
+            const QString &filePath,
+            const QString &lineText,
+            const QString &columnText,
+            const QString &message,
+            CodeEditor::DiagnosticInfo::Severity severity)
+    {
+        bool lineOk = false;
+        const int line = lineText.toInt(&lineOk);
+        if (!lineOk || line <= 0)
+        {
+            return;
+        }
+
+        CodeEditor *editor = resolveDiagnosticEditor(filePath);
+        if (!editor)
+        {
+            // 三字段旧格式默认属于当前编辑器。
+            if (filePath.isEmpty() || filePath == curFile)
+            {
+                editor = currentEditor();
+            }
+        }
+        if (!editor)
+        {
+            return;
+        }
+
+        bool columnOk = false;
+        const int compilerColumn = columnText.toInt(&columnOk);
+
+        CodeEditor::DiagnosticInfo info;
+        info.startLine = line;
+        info.endLine = line;
+        info.startColumn = (columnOk && compilerColumn > 0) ? compilerColumn - 1 : -1;
+        info.endColumn = info.startColumn >= 0 ? info.startColumn + 1 : -1;
+        info.message = message.trimmed();
+        info.source = tr("编译器");
+        info.severity = severity;
+
+        buildHoverDiagnostics[editor].append(info);
+    };
+
     errorTableWidget->setColumnWidth(0, 300);
     errorTableWidget->setColumnWidth(1, 60);
     errorTableWidget->setColumnWidth(2, 60);
@@ -27373,6 +29120,8 @@ void CompilerIDE::updateErrorTable(const QStringList &errors, const QStringList 
         errorTableWidget->setCurrentItem(nullptr);
         return;
     }
+
+    showBuildPanels(true);
 
     errorTableWidget->horizontalHeader()->setStretchLastSection(true);
     errorTableWidget->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
@@ -27463,8 +29212,7 @@ void CompilerIDE::updateErrorTable(const QStringList &errors, const QStringList 
             lineItem->setForeground(errorColor);
             lineItem->setTextAlignment(Qt::AlignCenter);
             lineItem->setBackground(backgroundColor);
-
-            QTableWidgetItem *columnItem = new QTableWidgetItem(
+QTableWidgetItem *columnItem = new QTableWidgetItem(
                 colNum == "0" ? tr("未知") : colNum);
             columnItem->setForeground(errorColor);
             columnItem->setTextAlignment(Qt::AlignCenter);
@@ -27565,6 +29313,44 @@ void CompilerIDE::updateErrorTable(const QStringList &errors, const QStringList 
             errorTableWidget->setItem(row, 3, messageItem);
 
             row++;
+        }
+    }
+
+    auto collectBuildDiagnostics =
+        [&registerBuildDiagnostic](const QStringList &items,
+                                   CodeEditor::DiagnosticInfo::Severity severity)
+    {
+        for (const QString &item : items)
+        {
+            const QStringList parts = item.split('|');
+            if (parts.size() >= 4)
+            {
+                registerBuildDiagnostic(parts[0],
+                                        parts[1],
+                                        parts[2],
+                                        parts.mid(3).join("|"),
+                                        severity);
+            }
+            else if (parts.size() >= 3)
+            {
+                registerBuildDiagnostic(QString(),
+                                        parts[0],
+                                        parts[1],
+                                        parts.mid(2).join("|"),
+                                        severity);
+            }
+        }
+    };
+
+    collectBuildDiagnostics(errors, CodeEditor::DiagnosticInfo::Error);
+    collectBuildDiagnostics(warnings, CodeEditor::DiagnosticInfo::Warning);
+
+    for (auto it = buildHoverDiagnostics.constBegin();
+         it != buildHoverDiagnostics.constEnd(); ++it)
+    {
+        if (it.key())
+        {
+            it.key()->setBuildDiagnostics(it.value());
         }
     }
 
@@ -28025,13 +29811,17 @@ void CompilerIDE::showSettings()
         themeMode,
         codeBeautify,
         codeCompletionEnabled,
-        editorFont);
+        editorFont,
+        customCompileCommands,
+        currentCustomCompileCommand);
 
     if (dialog.exec() == QDialog::Accepted)
     {
         debuggerPath = dialog.getDebuggerPath();
         codeBeautify = dialog.getCodeBeautify();
         codeCompletionEnabled = dialog.getCodeCompletion();
+        customCompileCommands = dialog.getCustomCompileCommands();
+        currentCustomCompileCommand = dialog.getCurrentCustomCompileCommand();
 
         if (codeCompleter)
         {
@@ -28421,7 +30211,7 @@ int CompilerIDE::findEditor(const QString &fileName) const
         {
             return i;
         }
-    }
+}
     return -1;
 }
 
@@ -29084,7 +30874,8 @@ void CompilerIDE::ensureCompileFlags(const QString &dirPath, bool isEasyX)
                                               flags << "-D_UNICODE";
                                           }
 
-                                          QFile flagFile(dir.filePath("compile_flags.txt"));
+                                          bool flagsWritten = false;
+                                          QSaveFile flagFile(dir.filePath("compile_flags.txt"));
                                           if (flagFile.open(QIODevice::WriteOnly | QIODevice::Text))
                                           {
                                               QTextStream out(&flagFile);
@@ -29094,20 +30885,25 @@ void CompilerIDE::ensureCompileFlags(const QString &dirPath, bool isEasyX)
                                               {
                                                   out << flag << '\n';
                                               }
-
-                                              flagFile.close();
+                                              out.flush();
+                                              flagsWritten = flagFile.commit();
                                           }
 
-                                          QFile metaFile(dir.filePath(".compileride_lsp_flags.meta"));
-                                          if (metaFile.open(QIODevice::WriteOnly | QIODevice::Text))
+                                          if (flagsWritten)
                                           {
-                                              metaFile.write(expectedKey.toUtf8());
-                                              metaFile.close();
-                                              QMetaObject::invokeMethod(self, [self, localDirPath]()
-                                                                        {
-                                                                            self->m_lspFlagDirs.insert(localDirPath);
-                                                                        },
-                                                                        Qt::QueuedConnection);
+                                              QSaveFile metaFile(dir.filePath(".compileride_lsp_flags.meta"));
+                                              if (metaFile.open(QIODevice::WriteOnly | QIODevice::Text))
+                                              {
+                                                  metaFile.write(expectedKey.toUtf8());
+                                                  if (metaFile.commit())
+                                                  {
+                                                      QMetaObject::invokeMethod(self, [self, localDirPath]()
+                                                                                {
+                                                                                    self->m_lspFlagDirs.insert(localDirPath);
+                                                                                },
+                                                                                Qt::QueuedConnection);
+                                                  }
+                                              }
                                           }
                                       });
 
@@ -29180,7 +30976,7 @@ void CompilerIDE::initLSP()
                            m_lspAvailable = true;
 
                            connect(m_lspClient, &LSPClient::diagnosticsReceived,
-                                   this, [this](const QString &uri, const QList<LSPDiagnostic> &diags)
+                                   this, [this](const QString &uri, int version, const QList<LSPDiagnostic> &diags)
                                    {
                                        CodeEditor *editor = nullptr;
                                        for (auto it = m_editorUris.constBegin(); it != m_editorUris.constEnd(); ++it)
@@ -29202,7 +30998,43 @@ void CompilerIDE::initLSP()
                                        if (!editor)
                                            return;
 
+                                       // clangd 的 publishDiagnostics 是异步的。文本已经继续编辑时，
+                                       // 旧版本诊断仍可能晚到；若直接套到新文本上，就会出现
+                                       // “鼠标在 h 上却显示 use of undeclared identifier 'd'”之类串台。
+                                       const int expectedVersion = editor->property("lspExpectedDiagnosticsVersion").toInt();
+                                       const bool waitingForFreshDiagnostics = editor->property("lspDiagnosticsDirty").toBool();
+
+                                       // There may be up to 300 ms between a local edit and the debounced
+                                       // didChange. During that window clangd can still publish diagnostics
+                                       // for the previous draft. Never apply them to unsent local text.
+                                       const QByteArray currentTextHash = QCryptographicHash::hash(
+                                                                                  editor->toPlainText().toUtf8(),
+                                                                                  QCryptographicHash::Sha1)
+                                                                                  .toHex();
+                                       const QByteArray lastSentTextHash =
+                                           editor->property("lspLastTextHash").toByteArray();
+                                       if (!lastSentTextHash.isEmpty() && currentTextHash != lastSentTextHash)
+                                       {
+                                           return;
+                                       }
+
+                                       if (version >= 0 && expectedVersion > 0 && version != expectedVersion)
+                                       {
+                                           return;
+                                       }
+
+                                       if (waitingForFreshDiagnostics)
+                                       {
+                                           // While an exact clangd revision is pending, never accept an
+                                           // unversioned result: it may belong to the previous draft.
+                                           if (version < 0 || expectedVersion <= 0 || version != expectedVersion)
+                                           {
+                                               return;
+                                           }
+                                       }
+
                                        QList<QTextEdit::ExtraSelection> selections;
+                                       QList<CodeEditor::DiagnosticInfo> hoverDiagnostics;
                                        QSet<int> errorLines, warningLines;
 
                                        for (const LSPDiagnostic &d : diags)
@@ -29251,12 +31083,40 @@ void CompilerIDE::initLSP()
                                                sel.format.setUnderlineColor(QColor(100, 200, 100));
                                            }
 
+                                           CodeEditor::DiagnosticInfo hoverInfo;
+                                           hoverInfo.startLine = d.line + 1;
+                                           hoverInfo.startColumn = d.column;
+                                           hoverInfo.endLine = d.endLine >= 0 ? d.endLine + 1 : d.line + 1;
+                                           hoverInfo.endColumn = d.endColumn;
+                                           hoverInfo.message = d.message;
+                                           hoverInfo.source = QStringLiteral("clangd");
+
+                                           if (d.severity == LSPDiagnostic::Error)
+                                           {
+                                               hoverInfo.severity = CodeEditor::DiagnosticInfo::Error;
+                                           }
+                                           else if (d.severity == LSPDiagnostic::Warning)
+                                           {
+                                               hoverInfo.severity = CodeEditor::DiagnosticInfo::Warning;
+                                           }
+                                           else if (d.severity == LSPDiagnostic::Info)
+                                           {
+                                               hoverInfo.severity = CodeEditor::DiagnosticInfo::Info;
+                                           }
+                                           else
+                                           {
+                                               hoverInfo.severity = CodeEditor::DiagnosticInfo::Hint;
+                                           }
+
+                                           hoverDiagnostics.append(hoverInfo);
                                            selections.append(sel);
                                        }
 
                                        editor->setLspDiagnosticSelections(selections);
+                                       editor->setLspDiagnostics(hoverDiagnostics);
                                        editor->setErrorLines(errorLines);
                                        editor->setWarningLines(warningLines);
+                                       editor->setProperty("lspDiagnosticsDirty", false);
                                    });
 
                            connect(m_lspClient, &LSPClient::serverError, this, [this](const QString &err)
@@ -29352,8 +31212,7 @@ void CompilerIDE::sendOpenToLSP(CodeEditor *editor, const QString &filePath)
 
                            CodeEditor *editor = editorPtr.data();
                            editor->setProperty("lspOpenScheduled", false);
-
-                           if (!m_lspAvailable || !m_lspClient)
+if (!m_lspAvailable || !m_lspClient)
                            {
                                return;
                            }
@@ -29440,6 +31299,8 @@ void CompilerIDE::sendOpenToLSP(CodeEditor *editor, const QString &filePath)
 
                            m_editorUris[editor] = uri;
                            m_editorVersions[editor] = 1;
+                           editor->setProperty("lspExpectedDiagnosticsVersion", 1);
+                           editor->setProperty("lspDiagnosticsDirty", false);
 
                            QString text = editor->toPlainText();
                            m_lspClient->openDocument(uri, text);
@@ -29488,20 +31349,56 @@ void CompilerIDE::sendChangeToLSP(CodeEditor *editor)
 
     QByteArray lastHash = editor->property("lspLastTextHash").toByteArray();
 
-    if (currentHash == lastHash)
+    if (currentHash == lastHash && !editor->property("lspDiagnosticsDirty").toBool())
     {
         qDebug() << "LSP skip change: text not changed for" << uri;
         return;
     }
 
-    int version = m_editorVersions.value(editor, 1) + 1;
+    // 即使用户在 debounce 时间内把文本改回原样，只要旧诊断已经因编辑而失效，
+    // 仍发送一个新版本 didChange，强制 clangd 返回与当前文本一致的新诊断。
+
+    const int currentVersion = m_editorVersions.value(editor, 1);
+    const int reservedVersion = editor->property("lspExpectedDiagnosticsVersion").toInt();
+    const int version = qMax(currentVersion + 1, reservedVersion);
     m_editorVersions[editor] = version;
 
     qDebug() << "Sending change for" << uri << "version" << version;
 
+    editor->setProperty("lspExpectedDiagnosticsVersion", version);
+    editor->setProperty("lspDiagnosticsDirty", true);
     m_lspClient->changeDocument(uri, text, version);
 
     editor->setProperty("lspLastTextHash", currentHash);
+
+    // Modern clangd sends a version because we advertise versionSupport above.
+    // Keep a compatibility escape hatch for older/non-conforming servers that
+    // omit PublishDiagnosticsParams.version: after a bounded wait, allow the next
+    // versionless diagnostic only if the editor still contains exactly the text
+    // that was sent in this revision.
+    QPointer<CodeEditor> editorPtr(editor);
+    const QByteArray sentHash = currentHash;
+    const int sentVersion = version;
+    QTimer::singleShot(900, this, [editorPtr, sentHash, sentVersion]()
+                       {
+                           if (!editorPtr || !editorPtr->property("lspDiagnosticsDirty").toBool())
+                           {
+                               return;
+                           }
+                           if (editorPtr->property("lspExpectedDiagnosticsVersion").toInt() != sentVersion)
+                           {
+                               return;
+                           }
+                           const QByteArray nowHash = QCryptographicHash::hash(
+                                                          editorPtr->toPlainText().toUtf8(),
+                                                          QCryptographicHash::Sha1)
+                                                          .toHex();
+                           if (nowHash == sentHash &&
+                               editorPtr->property("lspLastTextHash").toByteArray() == sentHash)
+                           {
+                               editorPtr->setProperty("lspDiagnosticsDirty", false);
+                           }
+                       });
 }
 
 void CompilerIDE::sendCloseToLSP(CodeEditor *editor)
@@ -30344,8 +32241,7 @@ void CheckerWidget::startNextCompile()
         resetBtn->setEnabled(true);
         return;
     }
-
-    if (pendingCompileFiles.isEmpty())
+if (pendingCompileFiles.isEmpty())
     {
         if (!compileErrors.isEmpty())
         {
@@ -31344,7 +33240,7 @@ void CheckerWidget::startParallelSolution(ParallelTask *task)
                 task->solutionOutput = QString::fromLocal8Bit(task->process->readAllStandardOutput());
                 if (task->standardOutput.trimmed() != task->solutionOutput.trimmed())
                 {
-                    failParallelTask(task,
+failParallelTask(task,
                                      tr("发现答案错误 (WA) - 第 %1 组").arg(task->groupIndex + 1),
                                      tr("发现答案错误 (WA)"));
                     return;
