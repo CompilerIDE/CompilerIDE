@@ -175,10 +175,10 @@
 
 #pragma comment(lib, "windowsapp.lib")
 
-const QString IDE_VERSION = "3.8.0";
+const QString IDE_VERSION = "3.8.1";
 
-const QString BUILD_DATE = "2026-08-30";
-const QString BUILD_TIME = "20:12:07";
+const QString BUILD_DATE = "2026-09-25";
+const QString BUILD_TIME = "10:14:31";
 
 enum class ThemeMode
 {
@@ -676,7 +676,8 @@ public:
                             bool codeCompletion = true,
                             const QFont &editorFont = QFont("Consolas", 11),
                             const QStringList &customCompileCommands = QStringList(),
-                            const QString &currentCustomCompileCommand = QString());
+                            const QString &currentCustomCompileCommand = QString(),
+                            bool previewUpdates = false);
 
     QString getCompilerPath() const;
     QString getDebuggerPath() const;
@@ -693,6 +694,7 @@ public:
     bool getShowIndentGuides() const;
     QStringList getCustomCompileCommands() const;
     QString getCurrentCustomCompileCommand() const;
+    bool getPreviewUpdates() const;
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
@@ -727,6 +729,7 @@ private:
     QComboBox *uiStyleCombo;
     QComboBox *compileCommandCombo = nullptr;
     QLineEdit *newCompileCommandEdit = nullptr;
+    QCheckBox *previewUpdatesCheck = nullptr;
 
     QString findCompilerInPath(const QString &basePath);
     QString findDebuggerFromCompilerPath(const QString &compilerPath);
@@ -748,7 +751,8 @@ SettingsDialog::SettingsDialog(QWidget *parent,
                                bool codeCompletion,
                                const QFont &editorFont,
                                const QStringList &customCompileCommands,
-                               const QString &currentCustomCompileCommand)
+                               const QString &currentCustomCompileCommand,
+                               bool previewUpdates)
     : QDialog(parent)
 {
     const bool darkTheme = currentTheme == ThemeMode::Dark;
@@ -1096,7 +1100,15 @@ QWidget *editorPage = new QWidget;
 
     editorGroup->setLayout(editorLayout);
 
+    QGroupBox *updateGroup = new QGroupBox(tr("更新设置"));
+    updateGroup->setStyleSheet(groupBoxStyle);
+    QVBoxLayout *updateLayout = new QVBoxLayout(updateGroup);
+    previewUpdatesCheck = new QCheckBox(tr("接收预览版更新（Preview）"));
+    previewUpdatesCheck->setChecked(previewUpdates);
+    updateLayout->addWidget(previewUpdatesCheck);
+
     editorContentLayout->addWidget(editorGroup);
+    editorContentLayout->addWidget(updateGroup);
     editorContentLayout->addStretch();
 
     editorScrollArea->setWidget(editorContent);
@@ -1353,7 +1365,50 @@ QWidget *editorPage = new QWidget;
     mainLayout->addWidget(navList);
     mainLayout->addWidget(rightPanel, 1);
 
-    connect(navList, &QListWidget::currentRowChanged, contentStack, &QStackedWidget::setCurrentIndex);
+    connect(navList, &QListWidget::currentRowChanged, this,
+            [contentStack](int index)
+            {
+                if (index < 0 || index >= contentStack->count())
+                {
+                    return;
+                }
+
+                QWidget *page = contentStack->widget(index);
+                if (!page)
+                {
+                    return;
+                }
+
+                contentStack->setCurrentIndex(index);
+
+                QGraphicsOpacityEffect *oldEffect =
+                    qobject_cast<QGraphicsOpacityEffect *>(page->graphicsEffect());
+                if (oldEffect)
+                {
+                    page->setGraphicsEffect(nullptr);
+                }
+
+                QGraphicsOpacityEffect *effect = new QGraphicsOpacityEffect(page);
+                effect->setOpacity(0.0);
+                page->setGraphicsEffect(effect);
+
+                QPropertyAnimation *animation = new QPropertyAnimation(effect, "opacity", page);
+                animation->setDuration(140);
+                animation->setEasingCurve(QEasingCurve::OutCubic);
+                animation->setStartValue(0.0);
+                animation->setEndValue(1.0);
+
+                QObject::connect(animation, &QPropertyAnimation::finished, page,
+                                 [page, effect]()
+                                 {
+                                     if (page->graphicsEffect() == effect)
+                                     {
+                                         page->setGraphicsEffect(nullptr);
+                                     }
+                                 });
+
+                animation->start(QAbstractAnimation::DeleteWhenStopped);
+            });
 
     setLayout(mainLayout);
 }
@@ -1396,6 +1451,11 @@ bool SettingsDialog::getCodeBeautify() const
 bool SettingsDialog::getShowIndentGuides() const
 {
     return showIndentGuidesCheck->isChecked();
+}
+
+bool SettingsDialog::getPreviewUpdates() const
+{
+    return previewUpdatesCheck && previewUpdatesCheck->isChecked();
 }
 
 void SettingsDialog::loadCustomCompletions()
@@ -6779,6 +6839,7 @@ public:
 
 protected:
     void showEvent(QShowEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     void onCardClicked(FileType type);
@@ -6825,36 +6886,123 @@ NewFileDialog::~NewFileDialog()
 {
 }
 
+bool NewFileDialog::eventFilter(QObject *watched, QEvent *event)
+{
+    QPushButton *card = qobject_cast<QPushButton *>(watched);
+    if (card && (card == normalCard || card == easyxCard))
+    {
+        QGraphicsDropShadowEffect *shadowEffect = qobject_cast<QGraphicsDropShadowEffect *>(card->graphicsEffect());
+        QPropertyAnimation *blurAnimation = shadowEffect
+                                                ? shadowEffect->findChild<QPropertyAnimation *>("CardHoverBlurAnimation")
+                                                : nullptr;
+        QPropertyAnimation *offsetAnimation = shadowEffect
+                                                  ? shadowEffect->findChild<QPropertyAnimation *>("CardHoverOffsetAnimation")
+                                                  : nullptr;
+
+        if (shadowEffect && blurAnimation && offsetAnimation)
+        {
+            const bool hovering = event->type() == QEvent::Enter;
+            const bool leaving = event->type() == QEvent::Leave;
+
+            if (hovering || leaving)
+            {
+                blurAnimation->stop();
+                offsetAnimation->stop();
+
+                blurAnimation->setStartValue(shadowEffect->blurRadius());
+                blurAnimation->setEndValue(hovering ? 18.0 : 0.0);
+                offsetAnimation->setStartValue(shadowEffect->yOffset());
+                offsetAnimation->setEndValue(hovering ? 3.0 : 0.0);
+
+                blurAnimation->start();
+                offsetAnimation->start();
+            }
+        }
+    }
+
+    return QDialog::eventFilter(watched, event);
+}
+
 void NewFileDialog::showEvent(QShowEvent *event)
 {
     QDialog::showEvent(event);
 
-    QWidget *anchorWindow = parentWidget() ? parentWidget()->window() : nullptr;
-    QScreen *targetScreen = anchorWindow ? anchorWindow->screen() : screen();
-    if (!targetScreen)
-    {
-        targetScreen = QGuiApplication::primaryScreen();
-    }
-    if (!targetScreen)
-    {
-        return;
-    }
+    QTimer::singleShot(0, this, [this]()
+                       {
+                           QWidget *anchorWindow = parentWidget() ? parentWidget()->window() : nullptr;
+                           QScreen *targetScreen = nullptr;
 
-    const QRect available = targetScreen->availableGeometry();
-    const QPoint center = (anchorWindow && anchorWindow->isVisible())
-                              ? anchorWindow->frameGeometry().center()
-                              : available.center();
+                           if (anchorWindow && anchorWindow->windowHandle())
+                           {
+                               targetScreen = anchorWindow->windowHandle()->screen();
+                           }
 
-    QPoint topLeft(center.x() - width() / 2, center.y() - height() / 2);
-    topLeft.setX(qBound(available.left(), topLeft.x(), qMax(available.left(), available.right() - width() + 1)));
-    topLeft.setY(qBound(available.top(), topLeft.y(), qMax(available.top(), available.bottom() - height() + 1)));
-    move(topLeft);
+                           if (!targetScreen && anchorWindow)
+                           {
+                               targetScreen = QGuiApplication::screenAt(anchorWindow->frameGeometry().center());
+                           }
+
+                           if (!targetScreen)
+                           {
+                               targetScreen = screen();
+                           }
+
+                           if (!targetScreen)
+                           {
+                               targetScreen = QGuiApplication::primaryScreen();
+                           }
+
+                           if (!targetScreen)
+                           {
+                               return;
+                           }
+
+                           const QRect available = targetScreen->availableGeometry();
+                           const QRect currentGeometry = geometry();
+                           const QRect currentFrameGeometry = frameGeometry();
+                           const int horizontalFrame = currentGeometry.left() - currentFrameGeometry.left() +
+                                                       currentFrameGeometry.right() - currentGeometry.right();
+                           const int verticalFrame = currentGeometry.top() - currentFrameGeometry.top() +
+                                                     currentFrameGeometry.bottom() - currentGeometry.bottom();
+                           const int maxClientWidth = qMax(1, available.width() - horizontalFrame);
+                           const int maxClientHeight = qMax(1, available.height() - verticalFrame);
+                           setFixedSize(qMin(720, maxClientWidth), qMin(500, maxClientHeight));
+
+                           QRect referenceRect = available;
+
+                           if (anchorWindow && anchorWindow->isVisible())
+                           {
+                               const QRect visibleAnchor = anchorWindow->frameGeometry().intersected(available);
+                               if (!visibleAnchor.isEmpty())
+                               {
+                                   referenceRect = visibleAnchor;
+                               }
+                           }
+
+                           QSize frameSize = frameGeometry().size();
+                           if (!frameSize.isValid() || frameSize.isEmpty())
+                           {
+                               frameSize = size();
+                           }
+
+                           QPoint frameTopLeft(referenceRect.center().x() - frameSize.width() / 2,
+                                               referenceRect.center().y() - frameSize.height() / 2);
+                           frameTopLeft.setX(qBound(available.left(),
+                                                    frameTopLeft.x(),
+                                                    qMax(available.left(), available.right() - frameSize.width() + 1)));
+                           frameTopLeft.setY(qBound(available.top(),
+                                                    frameTopLeft.y(),
+                                                    qMax(available.top(), available.bottom() - frameSize.height() + 1)));
+
+                           const QPoint frameOffset = geometry().topLeft() - frameGeometry().topLeft();
+                           move(frameTopLeft + frameOffset);
+                       });
 }
 
 void NewFileDialog::setupUI()
 {
     setWindowTitle(tr("新建文件"));
-    setFixedSize(720, 500);
+    resize(720, 500);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
     const QString pageBackground = isDarkTheme ? "#242A32" : isEyeCareTheme ? "#F6EED9" : "#F4F7FB";
@@ -7183,6 +7331,24 @@ QWidget *NewFileDialog::createProjectCard(const QString &title, const QString &d
     QVBoxLayout *mainCardLayout = new QVBoxLayout(card);
     mainCardLayout->setContentsMargins(0, 0, 0, 0);
     mainCardLayout->addWidget(contentWidget);
+
+    QGraphicsDropShadowEffect *shadowEffect = new QGraphicsDropShadowEffect(card);
+    shadowEffect->setBlurRadius(0.0);
+    shadowEffect->setOffset(0.0, 0.0);
+    shadowEffect->setColor(QColor(0, 0, 0, isDarkTheme ? 135 : 70));
+    card->setGraphicsEffect(shadowEffect);
+
+    QPropertyAnimation *blurAnimation = new QPropertyAnimation(shadowEffect, "blurRadius", shadowEffect);
+    blurAnimation->setObjectName("CardHoverBlurAnimation");
+    blurAnimation->setDuration(150);
+    blurAnimation->setEasingCurve(QEasingCurve::OutCubic);
+
+    QPropertyAnimation *offsetAnimation = new QPropertyAnimation(shadowEffect, "yOffset", shadowEffect);
+    offsetAnimation->setObjectName("CardHoverOffsetAnimation");
+    offsetAnimation->setDuration(150);
+    offsetAnimation->setEasingCurve(QEasingCurve::OutCubic);
+
+    card->installEventFilter(this);
 
     connect(card, &QPushButton::clicked, this, [this, type]()
             {
@@ -12725,7 +12891,7 @@ public:
     explicit UpdateManager(QObject *parent = nullptr);
     ~UpdateManager();
 
-    void checkForUpdates(bool silent = false);
+    void checkForUpdates(bool silent = false, bool allowPreview = false);
     bool isUpdateAvailable() const
     {
         return updateAvailable;
@@ -12772,6 +12938,7 @@ private:
 
     bool updateAvailable;
     bool silentCheck;
+    bool allowPreviewUpdates;
     QString newVersion;
     QString downloadUrl;
     QString downloadedFilePath;
@@ -12783,7 +12950,7 @@ private:
 };
 
 UpdateManager::UpdateManager(QObject *parent)
-    : QObject(parent), networkManager(nullptr), versionReply(nullptr), urlReply(nullptr), downloadReply(nullptr), sha256Reply(nullptr), updateAvailable(false), silentCheck(false), urlRetryCount(0), isChecking(false), progressDialog(nullptr)
+    : QObject(parent), networkManager(nullptr), versionReply(nullptr), urlReply(nullptr), downloadReply(nullptr), sha256Reply(nullptr), updateAvailable(false), silentCheck(false), allowPreviewUpdates(false), urlRetryCount(0), isChecking(false), progressDialog(nullptr)
 {
     networkManager = new QNetworkAccessManager(this);
 }
@@ -12816,7 +12983,7 @@ UpdateManager::~UpdateManager()
     }
 }
 
-void UpdateManager::checkForUpdates(bool silent)
+void UpdateManager::checkForUpdates(bool silent, bool allowPreview)
 {
     if (isChecking)
     {
@@ -12825,6 +12992,7 @@ void UpdateManager::checkForUpdates(bool silent)
     }
     isChecking = true;
     silentCheck = silent;
+    allowPreviewUpdates = allowPreview;
     updateAvailable = false;
     newVersion.clear();
     downloadUrl.clear();
@@ -12879,25 +13047,15 @@ void UpdateManager::onVersionCheckFinished()
     }
 
     QByteArray versionData = versionReply->readAll();
-    QString remoteVersion = QString::fromUtf8(versionData).trimmed();
-
-    QStringList localParts = IDE_VERSION.split('.');
-    QStringList remoteParts = remoteVersion.split('.');
-    bool hasUpdate = false;
-    for (int i = 0; i < qMin(localParts.size(), remoteParts.size()); i++)
+    QString remoteVersion = QString::fromUtf8(versionData);
+    while (!remoteVersion.isEmpty() && remoteVersion.back().isSpace())
     {
-        int localNum = localParts[i].toInt();
-        int remoteNum = remoteParts[i].toInt();
-        if (remoteNum > localNum)
-        {
-            hasUpdate = true;
-            break;
-        }
-        else if (remoteNum < localNum)
-        {
-            break;
-        }
+        remoteVersion.chop(1);
     }
+
+    const bool isPreviewVersion = remoteVersion.endsWith("Preview", Qt::CaseInsensitive);
+    const bool hasUpdate = remoteVersion != IDE_VERSION &&
+                           (!isPreviewVersion || allowPreviewUpdates);
 
     if (!hasUpdate)
     {
@@ -13297,6 +13455,7 @@ class CompilerIDE;
 class SideBarContainer : public QWidget
 {
     Q_OBJECT
+    Q_PROPERTY(int animatedWidth READ animatedWidth WRITE setAnimatedWidth)
 public:
     SideBarContainer(QWidget *parent = nullptr);
     void addPage(const QString &name, QWidget *widget);
@@ -13306,6 +13465,8 @@ public:
     void setFeatureEnabled(const QString &name, bool enabled);
     bool isFeatureEnabled(const QString &name) const;
     bool isExpanded() const;
+    int animatedWidth() const;
+    void setAnimatedWidth(int width);
 
 signals:
     void featureDisabledClicked(const QString &name);
@@ -13318,6 +13479,7 @@ private:
     void updateButtonIcon(QPushButton *btn, const QString &pageName, bool dark);
     void collapse();
     void expand();
+    QDockWidget *parentDockWidget() const;
 
     QMap<QString, bool> featureEnabledMap;
     int m_currentIndex;
@@ -13329,18 +13491,112 @@ private:
     bool currentThemeIsDark;
     QWidget *rightPart;
     QWidget *activityBar;
+    QPropertyAnimation *widthAnimation;
+    int m_expandedWidth;
+    bool m_collapseAfterAnimation;
 };
 
 SideBarContainer::SideBarContainer(QWidget *parent)
-    : QWidget(parent), currentThemeIsDark(true), m_currentIndex(-1), rightPart(nullptr), activityBar(nullptr)
+    : QWidget(parent), currentThemeIsDark(true), m_currentIndex(-1), rightPart(nullptr), activityBar(nullptr),
+      widthAnimation(nullptr), m_expandedWidth(400), m_collapseAfterAnimation(false)
 {
     setupUI();
+    widthAnimation = new QPropertyAnimation(this, "animatedWidth", this);
+    widthAnimation->setDuration(180);
+    widthAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(widthAnimation, &QPropertyAnimation::finished, this, [this]()
+            {
+                QDockWidget *dock = parentDockWidget();
+
+                if (m_collapseAfterAnimation)
+                {
+                    if (rightPart)
+                    {
+                        rightPart->hide();
+                    }
+                    setFixedWidth(45);
+                    if (dock)
+                    {
+                        const int frameWidth = dock->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, dock);
+                        const int collapsedDockWidth = 45 + qMax(0, frameWidth) * 2;
+                        dock->setMinimumWidth(collapsedDockWidth);
+                        dock->setMaximumWidth(collapsedDockWidth);
+                        dock->resize(collapsedDockWidth, dock->height());
+                    }
+                    return;
+                }
+
+                setMinimumWidth(0);
+                setMaximumWidth(QWIDGETSIZE_MAX);
+                setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+
+                if (dock)
+                {
+                    dock->setMinimumWidth(0);
+                    dock->setMaximumWidth(QWIDGETSIZE_MAX);
+                }
+            });
     this->hide();
 }
 
 bool SideBarContainer::isExpanded() const
 {
-    return rightPart && rightPart->isVisible();
+    return rightPart && rightPart->isVisible() && !m_collapseAfterAnimation;
+}
+
+int SideBarContainer::animatedWidth() const
+{
+    return width();
+}
+
+void SideBarContainer::setAnimatedWidth(int width)
+{
+    const int boundedWidth = qMax(45, width);
+    setMinimumWidth(boundedWidth);
+    setMaximumWidth(boundedWidth);
+    resize(boundedWidth, height());
+
+    QDockWidget *dock = parentDockWidget();
+    if (dock)
+    {
+        const int frameWidth = dock->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, dock);
+        const int dockWidth = boundedWidth + qMax(0, frameWidth) * 2;
+        dock->setMinimumWidth(dockWidth);
+        dock->setMaximumWidth(dockWidth);
+        dock->resize(dockWidth, dock->height());
+        dock->updateGeometry();
+    }
+
+    updateGeometry();
+
+    if (parentWidget())
+    {
+        parentWidget()->updateGeometry();
+        if (parentWidget()->layout())
+        {
+            parentWidget()->layout()->activate();
+        }
+
+        if (parentWidget()->parentWidget() && parentWidget()->parentWidget()->layout())
+        {
+            parentWidget()->parentWidget()->layout()->activate();
+        }
+    }
+}
+
+QDockWidget *SideBarContainer::parentDockWidget() const
+{
+    QWidget *candidate = parentWidget();
+    while (candidate)
+    {
+        QDockWidget *dock = qobject_cast<QDockWidget *>(candidate);
+        if (dock)
+        {
+            return dock;
+        }
+        candidate = candidate->parentWidget();
+    }
+    return nullptr;
 }
 
 void SideBarContainer::addPage(const QString &name, QWidget *widget)
@@ -13358,6 +13614,11 @@ void SideBarContainer::addPage(const QString &name, QWidget *widget)
     btn->setToolTip(name);
     btn->setProperty("pageName", name);
     btn->installEventFilter(this);
+
+    QPropertyAnimation *hoverAnimation = new QPropertyAnimation(btn, "iconSize", btn);
+    hoverAnimation->setObjectName("SideBarHoverAnimation");
+    hoverAnimation->setDuration(120);
+    hoverAnimation->setEasingCurve(QEasingCurve::OutCubic);
 
     featureEnabledMap[name] = true;
 
@@ -13472,6 +13733,11 @@ void SideBarContainer::setDarkTheme(bool dark)
 
 bool SideBarContainer::eventFilter(QObject *watched, QEvent *event)
 {
+    QPushButton *hoverButton = qobject_cast<QPushButton *>(watched);
+    QPropertyAnimation *hoverAnimation = hoverButton
+                                             ? hoverButton->findChild<QPropertyAnimation *>("SideBarHoverAnimation")
+                                             : nullptr;
+
     if (event->type() == QEvent::Enter)
     {
         for (QPushButton *btn : navButtons)
@@ -13481,6 +13747,24 @@ bool SideBarContainer::eventFilter(QObject *watched, QEvent *event)
                 QEvent leaveEvent(QEvent::Leave);
                 QCoreApplication::sendEvent(btn, &leaveEvent);
             }
+        }
+
+        if (hoverButton && hoverAnimation && !hoverButton->icon().isNull())
+        {
+            hoverAnimation->stop();
+            hoverAnimation->setStartValue(hoverButton->iconSize());
+            hoverAnimation->setEndValue(QSize(24, 24));
+            hoverAnimation->start();
+        }
+    }
+    else if (event->type() == QEvent::Leave)
+    {
+        if (hoverButton && hoverAnimation && !hoverButton->icon().isNull())
+        {
+            hoverAnimation->stop();
+            hoverAnimation->setStartValue(hoverButton->iconSize());
+            hoverAnimation->setEndValue(QSize(20, 20));
+            hoverAnimation->start();
         }
     }
     else if (event->type() == QEvent::MouseButtonPress)
@@ -13641,8 +13925,28 @@ void SideBarContainer::collapse()
 {
     if (rightPart && rightPart->isVisible())
     {
-        rightPart->hide();
-        setFixedWidth(45);
+        const bool wasExpanding = widthAnimation &&
+                                  widthAnimation->state() == QAbstractAnimation::Running &&
+                                  widthAnimation->endValue().toInt() > width();
+        const int previousAnimationTarget = widthAnimation
+                                                ? widthAnimation->endValue().toInt()
+                                                : m_expandedWidth;
+
+        if (widthAnimation)
+        {
+            widthAnimation->stop();
+        }
+        if (isVisible() && width() > 45)
+        {
+            if (wasExpanding)
+            {
+                m_expandedWidth = qBound(280, previousAnimationTarget, 700);
+            }
+            else
+            {
+                m_expandedWidth = qBound(280, width(), 700);
+            }
+        }
 
         for (QPushButton *btn : navButtons)
         {
@@ -13655,32 +13959,67 @@ void SideBarContainer::collapse()
         }
 
         m_currentIndex = -1;
+        m_collapseAfterAnimation = true;
 
-        if (parentWidget() && parentWidget()->layout())
+        if (!isVisible() || width() <= 45 || !widthAnimation)
         {
-            parentWidget()->layout()->activate();
+            rightPart->hide();
+            setAnimatedWidth(45);
+            return;
         }
+
+        widthAnimation->setStartValue(width());
+        widthAnimation->setEndValue(45);
+        widthAnimation->start();
     }
 }
 
 void SideBarContainer::expand()
 {
-    if (rightPart && !rightPart->isVisible())
+    if (!rightPart)
     {
-        rightPart->show();
-        setFixedWidth(QWIDGETSIZE_MAX);
+        return;
+    }
+
+    if (widthAnimation)
+    {
+        widthAnimation->stop();
+    }
+    if (this->isHidden())
+    {
+        this->show();
+    }
+
+    m_collapseAfterAnimation = false;
+    rightPart->show();
+
+    const int startWidth = qMax(45, width());
+    const int targetWidth = qBound(280, m_expandedWidth, 700);
+
+    if (!widthAnimation || startWidth >= targetWidth)
+    {
+        if (startWidth > 45)
+        {
+            m_expandedWidth = qBound(280, startWidth, 700);
+        }
+
         setMinimumWidth(0);
         setMaximumWidth(QWIDGETSIZE_MAX);
         setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
-        if (this->isHidden())
+
+        QDockWidget *dock = parentDockWidget();
+        if (dock)
         {
-            this->show();
+            dock->setMinimumWidth(0);
+            dock->setMaximumWidth(QWIDGETSIZE_MAX);
         }
-        if (parentWidget() && parentWidget()->layout())
-        {
-            parentWidget()->layout()->activate();
-        }
+        return;
     }
+
+    setAnimatedWidth(startWidth);
+    widthAnimation->setStartValue(startWidth);
+    widthAnimation->setEndValue(targetWidth);
+    widthAnimation->start();
 }
 
 namespace
@@ -15314,6 +15653,7 @@ QPlainTextEdit *outputEdit = nullptr;
     UpdateManager *updateManager = nullptr;
     QAction *checkForUpdatesAct = nullptr;
     bool isCheckingForUpdates;
+    bool previewUpdates;
     QMetaObject::Connection updateCheckConnection;
     QMetaObject::Connection noUpdateConnection;
     bool comp_disableTerminal;
@@ -15910,7 +16250,7 @@ CompilerIDE::CompilerIDE()
       cppStandard("c++17"), autoBrackets(true), autoQuotes(true),
       autoIndent(true), indentSize(4), lineNumbers(true),
       darkTheme(true), themeMode(ThemeMode::Dark), debugger(nullptr), codeCompleter(nullptr),
-      terminal(nullptr), snippetManager(nullptr), diagnosticsTimer(nullptr), maxHistoryPoints(60), initialUptime(0), isNewCompilation(false), errorTableWidget(nullptr), isCheckingForUpdates(false), isDebugging(false),
+      terminal(nullptr), snippetManager(nullptr), diagnosticsTimer(nullptr), maxHistoryPoints(60), initialUptime(0), isNewCompilation(false), errorTableWidget(nullptr), isCheckingForUpdates(false), previewUpdates(false), isDebugging(false),
       currentDebugState(DebugState_Idle),
       debugDock(nullptr),
       debugWidget(nullptr),
@@ -20843,7 +21183,7 @@ void CompilerIDE::autoCheckForUpdates()
         disconnect(updateCheckConnection);
     }
 
-    updateManager->checkForUpdates(true);
+    updateManager->checkForUpdates(true, previewUpdates);
 
     updateCheckConnection = connect(updateManager, &UpdateManager::updateCheckFinished,
                                     this, [this](bool updateAvailable, const QString &newVersion)
@@ -20927,7 +21267,7 @@ void CompilerIDE::checkForUpdates()
         disconnect(noUpdateConnection);
     }
 
-    updateManager->checkForUpdates(false);
+    updateManager->checkForUpdates(false, previewUpdates);
 
     updateCheckConnection = connect(updateManager, &UpdateManager::updateCheckFinished,
                                     this, [this](bool updateAvailable, const QString &newVersion)
@@ -22511,6 +22851,7 @@ void CompilerIDE::writeSettings()
     settings.setValue("indentSize", indentSize);
     settings.setValue("codeFolding", codeFolding);
     settings.setValue("lineNumbers", lineNumbers);
+    settings.setValue("previewUpdates", previewUpdates);
     settings.setValue("themeMode", static_cast<int>(themeMode));
     settings.setValue("darkTheme", themeMode == ThemeMode::Dark);
     settings.sync();
@@ -22617,6 +22958,7 @@ void CompilerIDE::readSettings()
     indentSize = settings.value("indentSize", 4).toInt();
     codeFolding = settings.value("codeFolding", true).toBool();
     lineNumbers = settings.value("lineNumbers", true).toBool();
+    previewUpdates = settings.value("previewUpdates", false).toBool();
     int savedThemeMode;
     if (settings.contains("themeMode"))
     {
@@ -27219,14 +27561,11 @@ dialog->exec();
 
 void CompilerIDE::open()
 {
-    if (maybeSave())
+    QString fileName = QFileDialog::getOpenFileName(this, tr("打开文件"), "",
+                                                    tr("C++文件 (*.cpp *.cc *.cxx *.c++ *.h *.hpp *.hh *.hxx *.h++);;PDF文件 (*.pdf);;所有文件 (*)"));
+    if (!fileName.isEmpty())
     {
-        QString fileName = QFileDialog::getOpenFileName(this, tr("打开文件"), "",
-                                                        tr("C++文件 (*.cpp *.cc *.cxx *.c++ *.h *.hpp *.hh *.hxx *.h++);;PDF文件 (*.pdf);;所有文件 (*)"));
-        if (!fileName.isEmpty())
-        {
-            loadFile(fileName);
-        }
+        loadFile(fileName);
     }
 }
 
@@ -29813,7 +30152,8 @@ void CompilerIDE::showSettings()
         codeCompletionEnabled,
         editorFont,
         customCompileCommands,
-        currentCustomCompileCommand);
+        currentCustomCompileCommand,
+        previewUpdates);
 
     if (dialog.exec() == QDialog::Accepted)
     {
@@ -29822,6 +30162,7 @@ void CompilerIDE::showSettings()
         codeCompletionEnabled = dialog.getCodeCompletion();
         customCompileCommands = dialog.getCustomCompileCommands();
         currentCustomCompileCommand = dialog.getCurrentCustomCompileCommand();
+        previewUpdates = dialog.getPreviewUpdates();
 
         if (codeCompleter)
         {
