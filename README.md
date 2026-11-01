@@ -33,7 +33,7 @@
 <h4 align="center">系统要求：Windows 10 / 11 (x64)</h4>
 
 1. 下载 Qt：https://www.qt.io/development/download-qt-installer-oss
-2. 在 cmd 中依次输入：```cd \d C:\Users\用户名\Downloads```与```"下载的文件名（例如：qt-online-installer-windows-x64-4.11.0.exe）" --mirror https://mirror.nju.edu.cn/qt```
+2. 在 cmd 中依次输入：```cd \d C:\Users\用户名\Downloads```与```"下载的文件名（例如：qt-online-installer-windows-x64-4.11.1.exe）" --mirror https://mirror.nju.edu.cn/qt```
 3. 勾选对应组件并安装：<img width="873" height="811" alt="image" src="https://github.com/user-attachments/assets/1704a642-7ce5-42a4-ad7c-099f827a98da" />
                 <img width="851" height="797" alt="image" src="https://github.com/user-attachments/assets/245c105c-f2fa-4066-8db2-ee72461f052a" />
                 <img width="878" height="797" alt="image" src="https://github.com/user-attachments/assets/6836d8eb-b61a-4533-9cc0-d5a0929bdc9a" />
