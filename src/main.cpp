@@ -1,10 +1,19 @@
 /*
- *  Copyright (C) 2026 Compiler IDE Team
- *  介绍：CompilerIDE 是由 Compiler IDE Team 开发的一款IDE，采用 GPL 3.0 协议开源，内置数据评测器、竞赛模式、洛谷题目爬取器、对拍器等众多功能
- *  源码：30000+ 行
- *  AI 创作声明：本 IDE 部分内容使用 DeepSeek、Kimi、GPT 等人工智能模型辅助生成
- *  创作不易，如果你喜欢，可以在 Github 上点一个 Star 哦
-*/
+ * Copyright (C) 2026 Compiler IDE Team (CompilerIDE_Official@outlook.com)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -29,6 +38,8 @@
 #include <QPdfView>
 #include <QPdfDocument>
 #include <QHBoxLayout>
+#include <QGridLayout>
+#include <QFileIconProvider>
 #include <QWebEnginePermission>
 #include <QtWebChannel/QWebChannel>
 #include <QtWebEngineCore/QWebEngineSettings>
@@ -75,6 +86,7 @@
 #include <tlhelp32.h>
 #include <QThread>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QWidget>
 #include <QProcess>
 #include <QStandardItemModel>
@@ -84,6 +96,7 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QPlainTextEdit>
+#include <QPlainTextDocumentLayout>
 #include <QFont>
 #include <QFontDatabase>
 #include <QSyntaxHighlighter>
@@ -108,6 +121,7 @@
 #include <QTextStream>
 #include <QPair>
 #include <QList>
+#include <QMap>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPaintEvent>
@@ -116,6 +130,8 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QCheckBox>
+#include <QAbstractButton>
+#include <QUuid>
 #include <QSpinBox>
 #include <QTextDocument>
 #include <QTextFragment>
@@ -137,8 +153,10 @@
 #include <QScrollArea>
 #include <QScreen>
 #include <QShowEvent>
+#include <QWheelEvent>
 #include <QTemporaryFile>
 #include <QPropertyAnimation>
+#include <QVariantAnimation>
 #include <QEasingCurve>
 #include <QGraphicsOpacityEffect>
 #include <QProxyStyle>
@@ -152,6 +170,8 @@
 #include <QTcpSocket>
 #include <QHostAddress>
 #include <QSaveFile>
+#include <QScopeGuard>
+#include <QStringConverter>
 #include <QFile>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
@@ -172,19 +192,39 @@
 #include <QChartView>
 #include <QFontComboBox>
 #include <QLCDNumber>
+#include <utility>
+#include <limits>
+#include <cmath>
+#include <iterator>
+#include "MarkdownEditor.h"
+#include <QTemporaryDir>
+#include <memory>
 
 #pragma comment(lib, "windowsapp.lib")
 
-const QString IDE_VERSION = "3.8.1";
+const QString IDE_VERSION = "4.0.0 Preview";
 
-const QString BUILD_DATE = "2026-09-25";
-const QString BUILD_TIME = "10:14:31";
+const QString BUILD_DATE = "2026-11-21";
+const QString BUILD_TIME = "16:37:31";
 
 enum class ThemeMode
 {
     Light = 0,
     EyeCare = 1,
     Dark = 2
+};
+
+enum class CompletionAcceptMode
+{
+    Tab = 0,
+    Enter = 1,
+    Space = 2
+};
+
+enum class IndentationMode
+{
+    Tabs = 0,
+    Spaces = 1
 };
 
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
@@ -283,6 +323,49 @@ public:
             return QProxyStyle::pixelMetric(metric, option, widget);
         }
     }
+};
+
+class SettingsPageTransitionOverlay : public QWidget
+{
+public:
+    SettingsPageTransitionOverlay(const QPixmap &fromPixmap,
+                                  const QPixmap &toPixmap,
+                                  int direction,
+                                  QWidget *parent = nullptr)
+        : QWidget(parent),
+          m_fromPixmap(fromPixmap),
+          m_toPixmap(toPixmap),
+          m_direction(direction)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+    }
+
+    void setProgress(qreal progress)
+    {
+        m_progress = qBound<qreal>(0.0, progress, 1.0);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        Q_UNUSED(event);
+
+        QPainter painter(this);
+        painter.drawPixmap(QPoint(0, 0), m_fromPixmap);
+
+        const int travel = 18;
+        const int offset = qRound(static_cast<qreal>(m_direction) * travel * (1.0 - m_progress));
+        painter.setOpacity(0.72 + 0.28 * m_progress);
+        painter.drawPixmap(QPoint(offset, 0), m_toPixmap);
+    }
+
+private:
+    QPixmap m_fromPixmap;
+    QPixmap m_toPixmap;
+    int m_direction = 1;
+    qreal m_progress = 0.0;
 };
 
 // LSP 客户端
@@ -404,10 +487,6 @@ bool LSPClient::startServer(const QString &clangdPath, const QString &compileCom
                 syncCaps["dynamicRegistration"] = false;
                 textDocumentCaps["synchronization"] = syncCaps;
 
-                // LSP 3.15+: tell clangd that this client understands the optional
-                // PublishDiagnosticsParams.version field.  The hover layer relies on
-                // this to avoid attaching a diagnostic from an older draft to newer
-                // source text after rapid edits.
                 QJsonObject publishDiagnosticsCaps;
                 publishDiagnosticsCaps["versionSupport"] = true;
                 textDocumentCaps["publishDiagnostics"] = publishDiagnosticsCaps;
@@ -518,9 +597,6 @@ void LSPClient::changeDocument(const QString &uri, const QString &text, int vers
 
     params["contentChanges"] = changes;
 
-    // clangd extension: require diagnostics for exactly this document revision.
-    // This avoids its normal diagnostic coalescing from leaving an older message
-    // visible after rapid edits. clangd 7+ supports this field.
     params["wantDiagnostics"] = true;
 
     QJsonObject msg;
@@ -657,6 +733,102 @@ void LSPClient::handleNotification(const QJsonObject &notif)
     }
 }
 
+class SlidingSwitch : public QAbstractButton
+{
+public:
+    explicit SlidingSwitch(QWidget *parent = nullptr)
+        : QAbstractButton(parent)
+    {
+        setCheckable(true);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setFixedSize(54, 32);
+        setAccessibleName(tr("侧边栏功能开关"));
+
+        m_animation.setDuration(175);
+        m_animation.setEasingCurve(QEasingCurve::OutCubic);
+
+        connect(&m_animation, &QVariantAnimation::valueChanged, this,
+                [this](const QVariant &value)
+                {
+                    m_progress = value.toReal();
+                    update();
+                });
+
+        connect(this, &QAbstractButton::toggled, this,
+                [this](bool enabled)
+                {
+                    m_animation.stop();
+                    m_animation.setStartValue(m_progress);
+                    m_animation.setEndValue(enabled ? 1.0 : 0.0);
+                    m_animation.start();
+                });
+    }
+
+    void setDarkAppearance(bool dark)
+    {
+        m_dark = dark;
+        update();
+    }
+
+    void resetAnimation()
+    {
+        m_animation.stop();
+        m_progress = isChecked() ? 1.0 : 0.0;
+        update();
+    }
+
+    QSize sizeHint() const override
+    {
+        return QSize(54, 32);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        Q_UNUSED(event);
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        const QRectF track(1.0, 1.0, width() - 2.0, height() - 2.0);
+        const QColor offColor = m_dark ? QColor("#505562") : QColor("#D1D5DB");
+        const QColor onColor("#34C759");
+        const qreal progress = qBound(0.0, m_progress, 1.0);
+
+        const int red = qRound(offColor.red() + (onColor.red() - offColor.red()) * progress);
+        const int green = qRound(offColor.green() + (onColor.green() - offColor.green()) * progress);
+        const int blue = qRound(offColor.blue() + (onColor.blue() - offColor.blue()) * progress);
+
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(red, green, blue));
+        painter.drawRoundedRect(track, track.height() / 2.0, track.height() / 2.0);
+
+        const qreal knobDiameter = 25.0;
+        const qreal knobX = 4.5 + (width() - knobDiameter - 9.0) * progress;
+        const QRectF shadow(knobX, 4.5, knobDiameter, knobDiameter);
+
+        painter.setBrush(QColor(0, 0, 0, m_dark ? 62 : 32));
+        painter.drawEllipse(shadow.translated(0.0, 1.1));
+
+        painter.setBrush(Qt::white);
+        painter.drawEllipse(shadow);
+
+        if (hasFocus())
+        {
+            painter.setPen(QPen(QColor("#0A84FF"), 1.5));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRoundedRect(track.adjusted(-0.4, -0.4, 0.4, 0.4),
+                                    track.height() / 2.0, track.height() / 2.0);
+        }
+    }
+
+private:
+    QVariantAnimation m_animation;
+    qreal m_progress = 0.0;
+    bool m_dark = false;
+};
+
 // IDE 设置界面
 class SettingsDialog : public QDialog
 {
@@ -674,10 +846,14 @@ public:
                             ThemeMode currentTheme = ThemeMode::Dark,
                             bool codeBeautify = true,
                             bool codeCompletion = true,
+                            CompletionAcceptMode completionAcceptMode = CompletionAcceptMode::Tab,
+                            IndentationMode indentationMode = IndentationMode::Spaces,
                             const QFont &editorFont = QFont("Consolas", 11),
                             const QStringList &customCompileCommands = QStringList(),
                             const QString &currentCustomCompileCommand = QString(),
-                            bool previewUpdates = false);
+                            bool previewUpdates = false,
+                            const QStringList &sidebarFeatures = QStringList(),
+                            const QStringList &visibleSidebarFeatures = QStringList());
 
     QString getCompilerPath() const;
     QString getDebuggerPath() const;
@@ -688,6 +864,8 @@ public:
     bool getLineNumbers() const;
     ThemeMode getThemeMode() const;
     bool getCodeCompletion() const;
+    CompletionAcceptMode getCompletionAcceptMode() const;
+    IndentationMode getIndentationMode() const;
     bool getCodeBeautify() const;
     QFont getEditorFont() const;
     int getEditorFontSize() const;
@@ -695,6 +873,7 @@ public:
     QStringList getCustomCompileCommands() const;
     QString getCurrentCustomCompileCommand() const;
     bool getPreviewUpdates() const;
+    QStringList getVisibleSidebarFeatures() const;
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
@@ -715,6 +894,8 @@ private:
     QCheckBox *splashCheck;
     QCheckBox *welcomeCheck;
     QCheckBox *codeCompletionCheck;
+    QComboBox *completionAcceptCombo = nullptr;
+    QComboBox *indentationModeCombo = nullptr;
     QLineEdit *compilerPathEdit;
     QLineEdit *debuggerPathEdit;
     QCheckBox *showIndentGuidesCheck;
@@ -730,12 +911,18 @@ private:
     QComboBox *compileCommandCombo = nullptr;
     QLineEdit *newCompileCommandEdit = nullptr;
     QCheckBox *previewUpdatesCheck = nullptr;
+    QStringList m_sidebarFeatureNames;
+    QMap<QString, SlidingSwitch *> m_sidebarSwitches;
+    QLabel *m_sidebarSelectionCountLabel = nullptr;
+    QPointer<QFrame> m_sidebarToast;
 
     QString findCompilerInPath(const QString &basePath);
     QString findDebuggerFromCompilerPath(const QString &compilerPath);
     QString autoDetectDebuggerPath();
     void loadCustomCompletions();
     void saveCustomCompletions();
+    void refreshSidebarSelectionCount();
+    void showSidebarSelectionWarning(const QString &message);
 };
 
 SettingsDialog::SettingsDialog(QWidget *parent,
@@ -749,10 +936,14 @@ SettingsDialog::SettingsDialog(QWidget *parent,
                                ThemeMode currentTheme,
                                bool codeBeautify,
                                bool codeCompletion,
+                               CompletionAcceptMode completionAcceptMode,
+                               IndentationMode indentationMode,
                                const QFont &editorFont,
                                const QStringList &customCompileCommands,
                                const QString &currentCustomCompileCommand,
-                               bool previewUpdates)
+                               bool previewUpdates,
+                               const QStringList &sidebarFeatures,
+                               const QStringList &visibleSidebarFeatures)
     : QDialog(parent)
 {
     const bool darkTheme = currentTheme == ThemeMode::Dark;
@@ -760,8 +951,8 @@ SettingsDialog::SettingsDialog(QWidget *parent,
 
     setWindowTitle(tr("设置 - Compiler IDE %1").arg(IDE_VERSION));
     setModal(true);
-    setMinimumSize(750, 500);
-    resize(800, 550);
+    setMinimumSize(790, 540);
+    resize(900, 660);
 
     if (eyeCareTheme)
     {
@@ -809,10 +1000,12 @@ SettingsDialog::SettingsDialog(QWidget *parent,
     QListWidgetItem *compilerItem = new QListWidgetItem(tr("  编译器设置"));
     QListWidgetItem *editorItem = new QListWidgetItem(tr("  编辑器设置"));
     QListWidgetItem *customCompItem = new QListWidgetItem(tr("  自定义代码补全"));
+    QListWidgetItem *sidebarItem = new QListWidgetItem(tr("  侧边栏管理"));
 
     navList->addItem(compilerItem);
     navList->addItem(editorItem);
     navList->addItem(customCompItem);
+    navList->addItem(sidebarItem);
     navList->setCurrentRow(0);
 
     QWidget *rightPanel = new QWidget;
@@ -1011,7 +1204,7 @@ SettingsDialog::SettingsDialog(QWidget *parent,
 
     compilerScrollArea->setWidget(compilerContent);
     compilerPageLayout->addWidget(compilerScrollArea);
-QWidget *editorPage = new QWidget;
+    QWidget *editorPage = new QWidget;
     QVBoxLayout *editorPageLayout = new QVBoxLayout(editorPage);
     editorPageLayout->setContentsMargins(24, 24, 24, 24);
 
@@ -1046,6 +1239,27 @@ QWidget *editorPage = new QWidget;
     codeCompletionCheck = new QCheckBox(tr("启用代码补全"));
     codeCompletionCheck->setChecked(codeCompletion);
 
+    completionAcceptCombo = new QComboBox;
+    completionAcceptCombo->addItem(tr("Tab"), static_cast<int>(CompletionAcceptMode::Tab));
+    completionAcceptCombo->addItem(tr("Enter"), static_cast<int>(CompletionAcceptMode::Enter));
+    completionAcceptCombo->addItem(tr("空格"), static_cast<int>(CompletionAcceptMode::Space));
+    int completionAcceptIndex = completionAcceptCombo->findData(static_cast<int>(completionAcceptMode));
+    if (completionAcceptIndex < 0)
+    {
+        completionAcceptIndex = completionAcceptCombo->findData(static_cast<int>(CompletionAcceptMode::Tab));
+    }
+    completionAcceptCombo->setCurrentIndex(completionAcceptIndex);
+
+    indentationModeCombo = new QComboBox;
+    indentationModeCombo->addItem(tr("Tab"), static_cast<int>(IndentationMode::Tabs));
+    indentationModeCombo->addItem(tr("空格"), static_cast<int>(IndentationMode::Spaces));
+    int indentationModeIndex = indentationModeCombo->findData(static_cast<int>(indentationMode));
+    if (indentationModeIndex < 0)
+    {
+        indentationModeIndex = indentationModeCombo->findData(static_cast<int>(IndentationMode::Spaces));
+    }
+    indentationModeCombo->setCurrentIndex(indentationModeIndex);
+
     fontCombo = new QFontComboBox;
     fontCombo->setCurrentFont(editorFont);
 
@@ -1059,7 +1273,7 @@ QWidget *editorPage = new QWidget;
     indentSizeSpin = new QSpinBox;
     indentSizeSpin->setRange(1, 8);
     indentSizeSpin->setValue(indentSize);
-    indentSizeSpin->setSuffix(tr(" 个空格"));
+    indentSizeSpin->setSuffix(tr(" 列"));
 
     lineNumbersCheck = new QCheckBox(tr("显示行号"));
     lineNumbersCheck->setChecked(lineNumbers);
@@ -1078,6 +1292,24 @@ QWidget *editorPage = new QWidget;
         themeIndex = themeCombo->findData(static_cast<int>(ThemeMode::Dark));
     }
     themeCombo->setCurrentIndex(themeIndex);
+
+    const QList<QWidget *> wheelProtectedWidgets = {
+        compileCommandCombo,
+        completionAcceptCombo,
+        indentationModeCombo,
+        fontCombo,
+        fontSizeSpin,
+        indentSizeSpin,
+        themeCombo};
+
+    for (QWidget *widget : wheelProtectedWidgets)
+    {
+        if (widget)
+        {
+            widget->installEventFilter(this);
+        }
+    }
+
     editorLayout->addRow(tr("主题:"), themeCombo);
 
     splashCheck = new QCheckBox(tr("启用启动界面"));
@@ -1091,6 +1323,8 @@ QWidget *editorPage = new QWidget;
     editorLayout->addRow(autoQuotesCheck);
     editorLayout->addRow(codeBeautifyCheck);
     editorLayout->addRow(codeCompletionCheck);
+    editorLayout->addRow(tr("代码补全确认键:"), completionAcceptCombo);
+    editorLayout->addRow(tr("缩进方式:"), indentationModeCombo);
     editorLayout->addRow(lineNumbersCheck);
     editorLayout->addRow(autoIndentCheck);
     editorLayout->addRow(showIndentGuidesCheck);
@@ -1252,6 +1486,128 @@ QWidget *editorPage = new QWidget;
 
     loadCustomCompletions();
 
+    m_sidebarFeatureNames = sidebarFeatures;
+
+    const QColor pageBackground = darkTheme ? QColor("#202127")
+                                      : eyeCareTheme ? QColor("#FDF6E3")
+                                                     : QColor("#F7F8FA");
+    const QString panelColor = darkTheme ? "#2B2D35" : eyeCareTheme ? "#F8EFCF" : "#FFFFFF";
+    const QString borderColor = darkTheme ? "#424651" : eyeCareTheme ? "#D7C9A2" : "#E4E7EC";
+    const QString titleColor = darkTheme ? "#F4F5F8" : eyeCareTheme ? "#343126" : "#181D27";
+    const QString captionColor = darkTheme ? "#AAB1BE" : eyeCareTheme ? "#756D58" : "#667085";
+
+    QWidget *sidebarPage = new QWidget;
+    sidebarPage->setAutoFillBackground(true);
+    QPalette sidebarPalette = sidebarPage->palette();
+    sidebarPalette.setColor(QPalette::Window, pageBackground);
+    sidebarPage->setPalette(sidebarPalette);
+
+    QVBoxLayout *sidebarPageLayout = new QVBoxLayout(sidebarPage);
+    sidebarPageLayout->setContentsMargins(26, 24, 26, 22);
+    sidebarPageLayout->setSpacing(12);
+
+    QLabel *sidebarHeading = new QLabel(tr("功能管理"));
+    QFont headingFont = sidebarHeading->font();
+    headingFont.setPointSize(19);
+    headingFont.setBold(true);
+    sidebarHeading->setFont(headingFont);
+    sidebarHeading->setStyleSheet(QString("color: %1; background: transparent;").arg(titleColor));
+    sidebarPageLayout->addWidget(sidebarHeading);
+
+    QLabel *sidebarSubheading = new QLabel(tr("选择工作区左侧需要显示的功能。更改将在保存后立即生效，且会在下次启动时保留。"));
+    sidebarSubheading->setWordWrap(true);
+    sidebarSubheading->setStyleSheet(QString("color: %1; background: transparent; font-size: 12px;").arg(captionColor));
+    sidebarPageLayout->addWidget(sidebarSubheading);
+
+    QFrame *sidebarSummary = new QFrame;
+    sidebarSummary->setStyleSheet(QString(
+        "QFrame { background: %1; border: 1px solid %2; border-radius: 13px; }"
+        "QLabel { background: transparent; border: none; }").arg(panelColor, borderColor));
+
+    QHBoxLayout *summaryLayout = new QHBoxLayout(sidebarSummary);
+    summaryLayout->setContentsMargins(18, 12, 18, 12);
+
+    QVBoxLayout *summaryTextLayout = new QVBoxLayout;
+    summaryTextLayout->setSpacing(4);
+
+    QLabel *summaryHeading = new QLabel(tr("已启用的功能"));
+    summaryHeading->setStyleSheet(QString("color: %1; font-weight: 600; font-size: 13px;").arg(titleColor));
+
+    QLabel *summaryCaption = new QLabel(tr("至少保留 1 个，最多启用 12 个"));
+    summaryCaption->setStyleSheet(QString("color: %1; font-size: 11px;").arg(captionColor));
+
+    summaryTextLayout->addWidget(summaryHeading);
+    summaryTextLayout->addWidget(summaryCaption);
+    summaryLayout->addLayout(summaryTextLayout);
+    summaryLayout->addStretch();
+
+    m_sidebarSelectionCountLabel = new QLabel;
+    m_sidebarSelectionCountLabel->setAlignment(Qt::AlignCenter);
+    m_sidebarSelectionCountLabel->setMinimumWidth(120);
+    m_sidebarSelectionCountLabel->setStyleSheet(QString(
+        "color: %1; background: %2; border-radius: 10px; padding: 7px 12px; font-weight: 700; font-size: 14px;")
+        .arg(darkTheme ? "#B5D1FF" : "#175CD3", darkTheme ? "#334A65" : "#E8F1FF"));
+    summaryLayout->addWidget(m_sidebarSelectionCountLabel);
+    sidebarPageLayout->addWidget(sidebarSummary);
+
+    QScrollArea *sidebarScrollArea = new QScrollArea;
+    sidebarScrollArea->setWidgetResizable(true);
+    sidebarScrollArea->setFrameShape(QFrame::NoFrame);
+    sidebarScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    sidebarScrollArea->setStyleSheet("QScrollArea { border: none; background: transparent; }");
+
+    QWidget *sidebarRowsWidget = new QWidget;
+    sidebarRowsWidget->setAutoFillBackground(true);
+    sidebarRowsWidget->setPalette(sidebarPalette);
+
+    QVBoxLayout *sidebarRowsLayout = new QVBoxLayout(sidebarRowsWidget);
+    sidebarRowsLayout->setContentsMargins(0, 2, 6, 6);
+    sidebarRowsLayout->setSpacing(8);
+
+    for (int index = 0; index < m_sidebarFeatureNames.size(); ++index)
+    {
+        const QString feature = m_sidebarFeatureNames.at(index);
+
+        QFrame *row = new QFrame;
+        row->setMinimumHeight(56);
+        row->setObjectName("SidebarPreferenceRow");
+        row->setStyleSheet(QString(
+            "QFrame#SidebarPreferenceRow { background: %1; border: 1px solid %2; border-radius: 12px; }"
+            "QLabel { background: transparent; border: none; }").arg(panelColor, borderColor));
+
+        QHBoxLayout *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(18, 10, 16, 10);
+        rowLayout->setSpacing(13);
+
+        QLabel *nameLabel = new QLabel(feature);
+        nameLabel->setStyleSheet(QString("color: %1; font-size: 13px; font-weight: 600;").arg(titleColor));
+        rowLayout->addWidget(nameLabel, 1);
+
+        SlidingSwitch *featureSwitch = new SlidingSwitch;
+        featureSwitch->setDarkAppearance(darkTheme);
+        featureSwitch->setAccessibleName(tr("显示%1").arg(feature));
+        featureSwitch->setToolTip(tr("显示或隐藏：%1").arg(feature));
+        featureSwitch->setChecked(visibleSidebarFeatures.contains(feature));
+        featureSwitch->resetAnimation();
+        m_sidebarSwitches.insert(feature, featureSwitch);
+        rowLayout->addWidget(featureSwitch);
+
+        connect(featureSwitch, &QAbstractButton::toggled, this,
+                [this](bool enabled)
+                {
+                    Q_UNUSED(enabled)
+                    refreshSidebarSelectionCount();
+                });
+
+        sidebarRowsLayout->addWidget(row);
+    }
+
+    sidebarRowsLayout->addStretch();
+    sidebarScrollArea->setWidget(sidebarRowsWidget);
+    sidebarPageLayout->addWidget(sidebarScrollArea, 1);
+    contentStack->addWidget(sidebarPage);
+    refreshSidebarSelectionCount();
+
     QWidget *buttonBar = new QWidget;
     QHBoxLayout *buttonBarLayout = new QHBoxLayout(buttonBar);
     buttonBarLayout->setContentsMargins(16, 12, 16, 12);
@@ -1344,16 +1700,32 @@ QWidget *editorPage = new QWidget;
     }
 
     connect(buttonBox, &QDialogButtonBox::accepted, this, [this]()
-            {
-                qDebug() << "[SettingsDialog] 即将保存：字体 ="
-                         << fontCombo->currentFont().family() << "，字号 =" << fontSizeSpin->value();
-                QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
-                settings.setValue("enableSplash", splashCheck->isChecked());
-                settings.setValue("enableWelcome", welcomeCheck->isChecked());
-                settings.setValue("showIndentGuides", showIndentGuidesCheck->isChecked());
-                saveCustomCompletions();
-                accept();
-            });
+    {
+        qDebug() << "[SettingsDialog] 即将保存：字体 ="
+                 << fontCombo->currentFont().family() << "，字号 =" << fontSizeSpin->value();
+
+        const int selectedCount = getVisibleSidebarFeatures().size();
+
+        if (selectedCount < 1)
+        {
+            showSidebarSelectionWarning(tr("至少需要启用一个功能，不能全部隐藏。"));
+            return;
+        }
+
+        if (selectedCount > 12)
+        {
+            showSidebarSelectionWarning(tr("最多只能启用 12 个功能。"));
+            return;
+        }
+
+        QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
+        settings.setValue("enableSplash", splashCheck->isChecked());
+        settings.setValue("enableWelcome", welcomeCheck->isChecked());
+        settings.setValue("showIndentGuides", showIndentGuidesCheck->isChecked());
+        saveCustomCompletions();
+        accept();
+    });
+
     connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     buttonBarLayout->addStretch();
@@ -1368,46 +1740,73 @@ QWidget *editorPage = new QWidget;
     connect(navList, &QListWidget::currentRowChanged, this,
             [contentStack](int index)
             {
-                if (index < 0 || index >= contentStack->count())
+                if (index < 0 || index >= contentStack->count() ||
+                    index == contentStack->currentIndex())
                 {
                     return;
                 }
 
-                QWidget *page = contentStack->widget(index);
-                if (!page)
+                QWidget *existingOverlayWidget =
+                    contentStack->findChild<QWidget *>(
+                        "SettingsPageTransitionOverlay",
+                        Qt::FindDirectChildrenOnly);
+                if (existingOverlayWidget)
                 {
-                    return;
+                    delete existingOverlayWidget;
                 }
+
+                QVariantAnimation *existingAnimation =
+                    contentStack->findChild<QVariantAnimation *>(
+                        "SettingsPageTransitionAnimation",
+                        Qt::FindDirectChildrenOnly);
+                if (existingAnimation)
+                {
+                    existingAnimation->stop();
+                    delete existingAnimation;
+                }
+
+                const int previousIndex = contentStack->currentIndex();
+                const QPixmap fromPixmap = contentStack->grab();
 
                 contentStack->setCurrentIndex(index);
 
-                QGraphicsOpacityEffect *oldEffect =
-                    qobject_cast<QGraphicsOpacityEffect *>(page->graphicsEffect());
-                if (oldEffect)
+                const QPixmap toPixmap = contentStack->grab();
+                if (fromPixmap.isNull() || toPixmap.isNull())
                 {
-                    page->setGraphicsEffect(nullptr);
+                    return;
                 }
 
-                QGraphicsOpacityEffect *effect = new QGraphicsOpacityEffect(page);
-                effect->setOpacity(0.0);
-                page->setGraphicsEffect(effect);
+                SettingsPageTransitionOverlay *overlay =
+                    new SettingsPageTransitionOverlay(fromPixmap,
+                                                      toPixmap,
+                                                      index > previousIndex ? 1 : -1,
+                                                      contentStack);
+                overlay->setObjectName("SettingsPageTransitionOverlay");
+                overlay->setGeometry(contentStack->rect());
+                overlay->show();
+                overlay->raise();
 
-                QPropertyAnimation *animation = new QPropertyAnimation(effect, "opacity", page);
-                animation->setDuration(140);
-                animation->setEasingCurve(QEasingCurve::OutCubic);
+                QVariantAnimation *animation = new QVariantAnimation(contentStack);
+                animation->setObjectName("SettingsPageTransitionAnimation");
+                animation->setDuration(115);
                 animation->setStartValue(0.0);
                 animation->setEndValue(1.0);
+                animation->setEasingCurve(QEasingCurve::OutCubic);
 
-                QObject::connect(animation, &QPropertyAnimation::finished, page,
-                                 [page, effect]()
+                QObject::connect(animation, &QVariantAnimation::valueChanged, overlay,
+                                 [overlay](const QVariant &value)
                                  {
-                                     if (page->graphicsEffect() == effect)
-                                     {
-                                         page->setGraphicsEffect(nullptr);
-                                     }
+                                     overlay->setProgress(value.toReal());
                                  });
 
-                animation->start(QAbstractAnimation::DeleteWhenStopped);
+                QObject::connect(animation, &QVariantAnimation::finished, overlay,
+                                 [overlay, animation]()
+                                 {
+                                     overlay->deleteLater();
+                                     animation->deleteLater();
+                                 });
+
+                animation->start();
             });
 
     setLayout(mainLayout);
@@ -1415,6 +1814,48 @@ QWidget *editorPage = new QWidget;
 
 bool SettingsDialog::eventFilter(QObject *obj, QEvent *event)
 {
+    if (event->type() == QEvent::Wheel &&
+        (qobject_cast<QComboBox *>(obj) || qobject_cast<QSpinBox *>(obj)))
+    {
+        QWidget *widget = qobject_cast<QWidget *>(obj);
+        QScrollArea *scrollArea = nullptr;
+
+        for (QWidget *parent = widget ? widget->parentWidget() : nullptr;
+             parent;
+             parent = parent->parentWidget())
+        {
+            scrollArea = qobject_cast<QScrollArea *>(parent);
+            if (scrollArea)
+            {
+                break;
+            }
+        }
+
+        if (scrollArea && scrollArea->verticalScrollBar())
+        {
+            QWheelEvent *wheelEvent = static_cast<QWheelEvent *>(event);
+            QScrollBar *scrollBar = scrollArea->verticalScrollBar();
+            int scrollDelta = 0;
+
+            if (!wheelEvent->pixelDelta().isNull())
+            {
+                scrollDelta = wheelEvent->pixelDelta().y();
+            }
+            else if (!wheelEvent->angleDelta().isNull())
+            {
+                const double steps = static_cast<double>(wheelEvent->angleDelta().y()) / 120.0;
+                scrollDelta = qRound(steps * scrollBar->singleStep() * 3.0);
+            }
+
+            if (scrollDelta != 0)
+            {
+                scrollBar->setValue(scrollBar->value() - scrollDelta);
+            }
+        }
+
+        return true;
+    }
+
     if (obj == newCompletionEdit && event->type() == QEvent::KeyPress)
     {
         QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
@@ -1443,6 +1884,42 @@ bool SettingsDialog::getCodeCompletion() const
     return codeCompletionCheck->isChecked();
 }
 
+CompletionAcceptMode SettingsDialog::getCompletionAcceptMode() const
+{
+    if (!completionAcceptCombo)
+    {
+        return CompletionAcceptMode::Tab;
+    }
+
+    bool ok = false;
+    const int value = completionAcceptCombo->currentData().toInt(&ok);
+    if (!ok || value < static_cast<int>(CompletionAcceptMode::Tab) ||
+        value > static_cast<int>(CompletionAcceptMode::Space))
+    {
+        return CompletionAcceptMode::Tab;
+    }
+
+    return static_cast<CompletionAcceptMode>(value);
+}
+
+IndentationMode SettingsDialog::getIndentationMode() const
+{
+    if (!indentationModeCombo)
+    {
+        return IndentationMode::Spaces;
+    }
+
+    bool ok = false;
+    const int value = indentationModeCombo->currentData().toInt(&ok);
+    if (!ok || value < static_cast<int>(IndentationMode::Tabs) ||
+        value > static_cast<int>(IndentationMode::Spaces))
+    {
+        return IndentationMode::Spaces;
+    }
+
+    return static_cast<IndentationMode>(value);
+}
+
 bool SettingsDialog::getCodeBeautify() const
 {
     return codeBeautifyCheck->isChecked();
@@ -1456,6 +1933,112 @@ bool SettingsDialog::getShowIndentGuides() const
 bool SettingsDialog::getPreviewUpdates() const
 {
     return previewUpdatesCheck && previewUpdatesCheck->isChecked();
+}
+
+QStringList SettingsDialog::getVisibleSidebarFeatures() const
+{
+    QStringList visible;
+    for (const QString &name : m_sidebarFeatureNames)
+    {
+        const auto it = m_sidebarSwitches.constFind(name);
+        if (it != m_sidebarSwitches.cend() && it.value()->isChecked())
+        {
+            visible.append(name);
+        }
+    }
+    return visible;
+}
+
+void SettingsDialog::refreshSidebarSelectionCount()
+{
+    if (m_sidebarSelectionCountLabel)
+    {
+        m_sidebarSelectionCountLabel->setText(
+            tr("已启用 %1 个功能").arg(getVisibleSidebarFeatures().size()));
+    }
+}
+
+void SettingsDialog::showSidebarSelectionWarning(const QString &message)
+{
+    if (m_sidebarToast)
+    {
+        QPointer<QFrame> oldToast = m_sidebarToast;
+        m_sidebarToast = nullptr;
+        oldToast->close();
+        oldToast->deleteLater();
+    }
+
+    QLabel *label = new QLabel(this);
+    label->setText(message);
+    label->setAlignment(Qt::AlignCenter);
+    label->setWordWrap(true);
+    label->setMaximumWidth(600);
+
+    const bool darkTheme = palette().color(QPalette::Window).lightness() < 128;
+
+    QString bgColor;
+    QString textColor;
+    QString borderColor;
+
+    if (darkTheme)
+    {
+        bgColor = "#8B0000";
+        textColor = "white";
+        borderColor = "#FF6B6B";
+    }
+    else
+    {
+        bgColor = "#dc3545";
+        textColor = "white";
+        borderColor = "#ff6b6b";
+    }
+
+    label->setStyleSheet(QString(
+                             "QLabel {"
+                             "    background-color: %1;"
+                             "    color: %2;"
+                             "    font-size: 14px;"
+                             "    font-weight: bold;"
+                             "    padding: 10px 20px;"
+                             "    border-radius: 8px;"
+                             "    border: 2px solid %3;"
+                             "}")
+                             .arg(bgColor, textColor, borderColor));
+    label->adjustSize();
+
+    const int x = width() - label->width() - 20;
+    const int y = 20;
+    label->move(x, y);
+    label->raise();
+    label->show();
+
+    QGraphicsOpacityEffect *effect = new QGraphicsOpacityEffect(label);
+    label->setGraphicsEffect(effect);
+
+    QPropertyAnimation *fadeIn = new QPropertyAnimation(effect, "opacity", label);
+    fadeIn->setDuration(300);
+    fadeIn->setStartValue(0.0);
+    fadeIn->setEndValue(1.0);
+    fadeIn->setEasingCurve(QEasingCurve::OutCubic);
+    fadeIn->start(QAbstractAnimation::DeleteWhenStopped);
+
+    QTimer::singleShot(2700, label, [label, effect]()
+    {
+        if (!label)
+        {
+            return;
+        }
+
+        QPropertyAnimation *fadeOut = new QPropertyAnimation(effect, "opacity", label);
+        fadeOut->setDuration(300);
+        fadeOut->setStartValue(1.0);
+        fadeOut->setEndValue(0.0);
+        fadeOut->setEasingCurve(QEasingCurve::InCubic);
+        QObject::connect(fadeOut, &QPropertyAnimation::finished, label, &QLabel::deleteLater);
+        fadeOut->start(QAbstractAnimation::DeleteWhenStopped);
+    });
+
+    m_sidebarToast = label;
 }
 
 void SettingsDialog::loadCustomCompletions()
@@ -1997,7 +2580,8 @@ void SplashScreen::setupAnimations()
                 }
                 else if (progressValue < 75)
                 {
-                    loadingLabel->setText("正在配置编译器设置...");
+
+loadingLabel->setText("正在配置编译器设置...");
                 }
                 else
                 {
@@ -2063,10 +2647,628 @@ void SplashScreen::paintEvent(QPaintEvent *event)
     painter.drawLine(50, height() - 50, width() - 50, height() - 50);
 }
 
+struct NewFileThemeColors
+{
+    QString pageBackground;
+    QString welcomeBackground;
+    QString surfaceBackground;
+    QString footerBackground;
+    QString titleColor;
+    QString secondaryColor;
+    QString inputBackground;
+    QString borderColor;
+    QString hoverBorderColor;
+    QString itemBackground;
+    QString itemHoverBackground;
+    QString itemSelectedBackground;
+    QString tagBackground;
+    QString tagTextColor;
+    QString neutralButtonBackground;
+    QString neutralButtonHoverBackground;
+    QString neutralButtonPressedBackground;
+    QString accentColor;
+    QString accentHoverColor;
+    QString accentPressedColor;
+    QString disabledBackground;
+    QString disabledTextColor;
+    QString popupSelectionBackground;
+};
+
+class NewFileFilterComboBox : public QComboBox
+{
+public:
+    explicit NewFileFilterComboBox(QWidget *parent = nullptr)
+        : QComboBox(parent)
+    {
+    }
+
+    void setArrowColor(const QColor &color)
+    {
+        arrowColor = color;
+        update();
+    }
+
+    void setPopupColors(const QColor &background,
+                        const QColor &text,
+                        const QColor &hover,
+                        const QColor &selected)
+    {
+        popupBackgroundColor = background;
+        popupTextColor = text;
+        popupHoverColor = hover;
+        popupSelectedColor = selected;
+    }
+
+protected:
+    void showPopup() override
+    {
+        if (popupFrame)
+        {
+            hidePopup();
+            return;
+        }
+
+        QFrame *frame = new QFrame(this,
+                                   Qt::Popup |
+                                       Qt::FramelessWindowHint |
+                                       Qt::NoDropShadowWindowHint);
+        popupFrame = frame;
+        frame->setAttribute(Qt::WA_DeleteOnClose, true);
+        frame->setFrameShape(QFrame::NoFrame);
+        frame->setLineWidth(0);
+        frame->setMidLineWidth(0);
+        frame->setContentsMargins(0, 0, 0, 0);
+        frame->setStyleSheet(
+            QString(
+                "QFrame {"
+                "    background: %1;"
+                "    border: none;"
+                "    margin: 0px;"
+                "    padding: 0px;"
+                "}")
+                .arg(popupBackgroundColor.name()));
+        QPalette framePalette = frame->palette();
+        framePalette.setColor(QPalette::Window, popupBackgroundColor);
+        frame->setPalette(framePalette);
+        frame->setAutoFillBackground(true);
+
+        QVBoxLayout *layout = new QVBoxLayout(frame);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+
+        QListWidget *list = new QListWidget(frame);
+        popupList = list;
+        list->setFrameShape(QFrame::NoFrame);
+        list->setLineWidth(0);
+        list->setMidLineWidth(0);
+        list->setSpacing(0);
+        list->setContentsMargins(0, 0, 0, 0);
+        list->setMouseTracking(true);
+        list->viewport()->setMouseTracking(true);
+        list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        list->setSelectionMode(QAbstractItemView::SingleSelection);
+        list->setFocusPolicy(Qt::StrongFocus);
+        QPalette listPalette = list->palette();
+        listPalette.setColor(QPalette::Base, popupBackgroundColor);
+        listPalette.setColor(QPalette::Text, popupTextColor);
+        listPalette.setColor(QPalette::Highlight, popupSelectedColor);
+        listPalette.setColor(QPalette::HighlightedText, popupTextColor);
+        list->setPalette(listPalette);
+        list->viewport()->setAutoFillBackground(true);
+        list->setStyleSheet(
+            QString(
+                "QListWidget {"
+                "    background: %1;"
+                "    color: %2;"
+                "    border: none;"
+                "    outline: none;"
+                "    margin: 0px;"
+                "    padding: 0px;"
+                "}"
+                "QListWidget::item {"
+                "    min-height: 34px;"
+                "    padding: 0px 11px;"
+                "    margin: 0px;"
+                "    border: none;"
+                "    color: %2;"
+                "    background: %1;"
+                "}"
+                "QListWidget::item:hover {"
+                "    color: %2;"
+                "    background: %3;"
+                "}"
+                "QListWidget::item:selected {"
+                "    color: %2;"
+                "    background: %4;"
+                "}"
+                "QListWidget::item:selected:hover {"
+                "    color: %2;"
+                "    background: %4;"
+                "}")
+                .arg(popupBackgroundColor.name())
+                .arg(popupTextColor.name())
+                .arg(popupHoverColor.name())
+                .arg(popupSelectedColor.name()));
+
+        for (int i = 0; i < count(); ++i)
+        {
+            QListWidgetItem *item = new QListWidgetItem(itemIcon(i), itemText(i), list);
+            item->setData(Qt::UserRole, i);
+            item->setSizeHint(QSize(width(), 34));
+        }
+
+        if (currentIndex() >= 0 && currentIndex() < list->count())
+        {
+            list->setCurrentRow(currentIndex());
+        }
+
+        layout->addWidget(list);
+
+        const int visibleRows = qMax(1, qMin(count(), 8));
+        const int popupHeight = visibleRows * 34;
+        frame->resize(width(), popupHeight);
+
+        QPoint popupPosition = mapToGlobal(QPoint(0, height()));
+        QScreen *targetScreen = QGuiApplication::screenAt(mapToGlobal(rect().center()));
+        if (!targetScreen)
+        {
+            targetScreen = QGuiApplication::primaryScreen();
+        }
+
+        if (targetScreen)
+        {
+            const QRect available = targetScreen->availableGeometry();
+            if (popupPosition.y() + popupHeight > available.bottom() + 1)
+            {
+                popupPosition.setY(mapToGlobal(QPoint(0, 0)).y() - popupHeight);
+            }
+
+            popupPosition.setX(qBound(available.left(),
+                                      popupPosition.x(),
+                                      qMax(available.left(), available.right() - frame->width() + 1)));
+            popupPosition.setY(qBound(available.top(),
+                                      popupPosition.y(),
+                                      qMax(available.top(), available.bottom() - frame->height() + 1)));
+        }
+
+        connect(list, &QListWidget::itemClicked, frame,
+                [this, list](QListWidgetItem *item)
+                {
+                    if (!item)
+                    {
+                        return;
+                    }
+
+                    const int index = item->data(Qt::UserRole).toInt();
+                    if (index >= 0 && index < count())
+                    {
+                        setCurrentIndex(index);
+                    }
+                    hidePopup();
+                });
+        connect(list, &QListWidget::itemActivated, frame,
+                [this, list](QListWidgetItem *item)
+                {
+                    if (!item)
+                    {
+                        return;
+                    }
+
+                    const int index = item->data(Qt::UserRole).toInt();
+                    if (index >= 0 && index < count())
+                    {
+                        setCurrentIndex(index);
+                    }
+                    hidePopup();
+                });
+
+        QShortcut *escapeShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), frame);
+        connect(escapeShortcut, &QShortcut::activated, frame, [this]()
+                {
+                    hidePopup();
+                });
+
+        frame->move(popupPosition);
+        frame->show();
+        frame->raise();
+        QComboBox::hidePopup();
+        list->setFocus(Qt::PopupFocusReason);
+    }
+
+    void hidePopup() override
+    {
+        if (popupFrame)
+        {
+            QPointer<QFrame> frame = popupFrame;
+            popupFrame = nullptr;
+            popupList = nullptr;
+            frame->close();
+        }
+
+        QComboBox::hidePopup();
+    }
+
+    void paintEvent(QPaintEvent *event) override
+    {
+        QComboBox::paintEvent(event);
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(arrowColor);
+
+        const qreal centerX = width() - 15.0;
+        const qreal centerY = height() / 2.0 + 0.5;
+        QPainterPath arrowPath;
+        arrowPath.moveTo(centerX - 4.0, centerY - 2.0);
+        arrowPath.lineTo(centerX + 4.0, centerY - 2.0);
+        arrowPath.lineTo(centerX, centerY + 2.5);
+        arrowPath.closeSubpath();
+        painter.drawPath(arrowPath);
+    }
+
+private:
+    QColor arrowColor = QColor("#F0F0F0");
+    QColor popupBackgroundColor = QColor("#333333");
+    QColor popupTextColor = QColor("#F5F5F5");
+    QColor popupHoverColor = QColor("#424242");
+    QColor popupSelectedColor = QColor("#514879");
+    QPointer<QFrame> popupFrame;
+    QPointer<QListWidget> popupList;
+};
+
+static ThemeMode storedThemeMode()
+{
+    QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
+    int value = static_cast<int>(ThemeMode::Dark);
+
+    if (settings.contains("themeMode"))
+    {
+        value = settings.value("themeMode", value).toInt();
+    }
+    else
+    {
+        value = settings.value("darkTheme", true).toBool()
+                    ? static_cast<int>(ThemeMode::Dark)
+                    : static_cast<int>(ThemeMode::Light);
+    }
+
+    value = qBound(static_cast<int>(ThemeMode::Light),
+                   value,
+                   static_cast<int>(ThemeMode::Dark));
+    return static_cast<ThemeMode>(value);
+}
+
+static NewFileThemeColors newFileThemeColors(ThemeMode mode)
+{
+    NewFileThemeColors colors;
+
+    if (mode == ThemeMode::Dark)
+    {
+        colors.pageBackground = "#262626";
+        colors.welcomeBackground = "#2D3047";
+        colors.surfaceBackground = "#333333";
+        colors.footerBackground = "#2B2B2B";
+        colors.titleColor = "#F5F5F5";
+        colors.secondaryColor = "#C8C8C8";
+        colors.inputBackground = "#333333";
+        colors.borderColor = "#484848";
+        colors.hoverBorderColor = "#777777";
+        colors.itemBackground = "#2C2C2C";
+        colors.itemHoverBackground = "#323232";
+        colors.itemSelectedBackground = "#373737";
+        colors.tagBackground = "#414141";
+        colors.tagTextColor = "#E0E0E0";
+        colors.neutralButtonBackground = "#3B3B3B";
+        colors.neutralButtonHoverBackground = "#454545";
+        colors.neutralButtonPressedBackground = "#343434";
+        colors.accentColor = "#8C78FF";
+        colors.accentHoverColor = "#9A88FF";
+        colors.accentPressedColor = "#7763E9";
+        colors.disabledBackground = "#3A3A3A";
+        colors.disabledTextColor = "#888888";
+        colors.popupSelectionBackground = "#514879";
+    }
+    else if (mode == ThemeMode::EyeCare)
+    {
+        colors.pageBackground = "#FDF6E3";
+        colors.welcomeBackground = "#FDF6E3";
+        colors.surfaceBackground = "#FFF9E8";
+        colors.footerBackground = "#F3E8C8";
+        colors.titleColor = "#3B3A32";
+        colors.secondaryColor = "#6B6658";
+        colors.inputBackground = "#FFF9E8";
+        colors.borderColor = "#C7B98E";
+        colors.hoverBorderColor = "#9F916C";
+        colors.itemBackground = "#FFF9E8";
+        colors.itemHoverBackground = "#F3E8C8";
+        colors.itemSelectedBackground = "#E5D9B7";
+        colors.tagBackground = "#EDE2C3";
+        colors.tagTextColor = "#3B3A32";
+        colors.neutralButtonBackground = "#E9DDBB";
+        colors.neutralButtonHoverBackground = "#DFD1AA";
+        colors.neutralButtonPressedBackground = "#D4C49A";
+        colors.accentColor = "#6F8F5B";
+        colors.accentHoverColor = "#7C9B68";
+        colors.accentPressedColor = "#5E7A4E";
+        colors.disabledBackground = "#E5D9B7";
+        colors.disabledTextColor = "#9B927C";
+        colors.popupSelectionBackground = "#D8CDAE";
+    }
+    else
+    {
+        colors.pageBackground = "#F5F5F5";
+        colors.welcomeBackground = "#F4F6FA";
+        colors.surfaceBackground = "#FFFFFF";
+        colors.footerBackground = "#F2F2F2";
+        colors.titleColor = "#202020";
+        colors.secondaryColor = "#666666";
+        colors.inputBackground = "#FFFFFF";
+        colors.borderColor = "#C8C8C8";
+        colors.hoverBorderColor = "#888888";
+        colors.itemBackground = "#FFFFFF";
+        colors.itemHoverBackground = "#F2F2F2";
+        colors.itemSelectedBackground = "#EEEAFE";
+        colors.tagBackground = "#EAEAEA";
+        colors.tagTextColor = "#303030";
+        colors.neutralButtonBackground = "#E9E9E9";
+        colors.neutralButtonHoverBackground = "#DDDDDD";
+        colors.neutralButtonPressedBackground = "#D2D2D2";
+        colors.accentColor = "#6F5DE7";
+        colors.accentHoverColor = "#7F6EEF";
+        colors.accentPressedColor = "#5D4DCA";
+        colors.disabledBackground = "#E5E5E5";
+        colors.disabledTextColor = "#9A9A9A";
+        colors.popupSelectionBackground = "#DDD7FA";
+    }
+
+    return colors;
+}
+
+static QString newFileTypeIconPath(int type, ThemeMode)
+{
+    QStringList candidates;
+
+    if (type == 0)
+    {
+        candidates << ":/icons/file-cpp_for_eye_care_mode.svg";
+    }
+    else if (type == 1)
+    {
+        candidates << ":/icons/compass-tool.svg";
+    }
+    else if (type == 2)
+    {
+        candidates << ":/icons/file-md.svg";
+    }
+
+    for (const QString &candidate : candidates)
+    {
+        if (QFile::exists(candidate))
+        {
+            return candidate;
+        }
+    }
+
+    return candidates.isEmpty() ? QString() : candidates.first();
+}
+
+static QString newFileTypeDisplayName(int type)
+{
+    switch (type)
+    {
+    case 0:
+        return QCoreApplication::translate("NewFileType", "C++ 源文件");
+    case 1:
+        return QCoreApplication::translate("NewFileType", "EasyX 图形项目");
+    case 2:
+        return QCoreApplication::translate("NewFileType", "Markdown 文档");
+    default:
+        return QString();
+    }
+}
+
+static QList<int> recentNewFileTypes()
+{
+    QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
+    const QStringList stored = settings.value("recentNewFileTypes").toStringList();
+    QList<int> result;
+
+    for (const QString &value : stored)
+    {
+        bool ok = false;
+        const int type = value.toInt(&ok);
+        if (!ok || type < 0 || type > 2 || result.contains(type))
+        {
+            continue;
+        }
+
+        result.append(type);
+        if (result.size() >= 5)
+        {
+            break;
+        }
+    }
+
+    return result;
+}
+
+static void rememberRecentNewFileType(int type)
+{
+    if (type < 0 || type > 2)
+    {
+        return;
+    }
+
+    QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
+    QStringList stored = settings.value("recentNewFileTypes").toStringList();
+    const QString value = QString::number(type);
+    stored.removeAll(value);
+    stored.prepend(value);
+
+    while (stored.size() > 5)
+    {
+        stored.removeLast();
+    }
+
+    settings.setValue("recentNewFileTypes", stored);
+    settings.sync();
+}
+
+static void configureNewFileCombo(NewFileFilterComboBox *combo,
+                                  const NewFileThemeColors &colors)
+{
+    if (!combo)
+    {
+        return;
+    }
+
+    QString style = QString(
+                        "QComboBox {"
+                        "    background: %1;"
+                        "    color: %2;"
+                        "    border: 1px solid %3;"
+                        "    border-radius: 2px;"
+                        "    padding: 7px 34px 7px 12px;"
+                        "    min-height: 24px;"
+                        "    font-size: 13px;"
+                        "}"
+                        "QComboBox:hover {"
+                        "    background: %4;"
+                        "    border-color: %5;"
+                        "}"
+                        "QComboBox:focus {"
+                        "    background: %4;"
+                        "    border-color: %6;"
+                        "}"
+                        "QComboBox::drop-down {"
+                        "    subcontrol-origin: padding;"
+                        "    subcontrol-position: top right;"
+                        "    border: none;"
+                        "    width: 30px;"
+                        "}"
+                        "QComboBox::down-arrow {"
+                        "    image: none;"
+                        "    width: 0px;"
+                        "    height: 0px;"
+                        "}")
+                        .arg(colors.inputBackground)
+                        .arg(colors.titleColor)
+                        .arg(colors.borderColor)
+                        .arg(colors.neutralButtonHoverBackground)
+                        .arg(colors.hoverBorderColor)
+                        .arg(colors.accentColor);
+
+    combo->setStyleSheet(style);
+    combo->setArrowColor(QColor(colors.titleColor));
+    combo->setPopupColors(QColor(colors.inputBackground),
+                          QColor(colors.titleColor),
+                          QColor(colors.neutralButtonHoverBackground),
+                          QColor(colors.popupSelectionBackground));
+}
+
+static QScreen *dialogTargetScreen(QWidget *widget)
+{
+    if (!widget)
+    {
+        return QGuiApplication::primaryScreen();
+    }
+
+    QWidget *anchorWindow = widget->parentWidget() ? widget->parentWidget()->window() : nullptr;
+
+    if (anchorWindow && anchorWindow->windowHandle() && anchorWindow->windowHandle()->screen())
+    {
+        return anchorWindow->windowHandle()->screen();
+    }
+
+    if (anchorWindow)
+    {
+        QScreen *anchorScreen = QGuiApplication::screenAt(anchorWindow->frameGeometry().center());
+        if (anchorScreen)
+        {
+            return anchorScreen;
+        }
+    }
+
+    if (widget->windowHandle() && widget->windowHandle()->screen())
+    {
+        return widget->windowHandle()->screen();
+    }
+
+    QScreen *widgetScreen = widget->screen();
+    if (widgetScreen)
+    {
+        return widgetScreen;
+    }
+
+    QScreen *cursorScreen = QGuiApplication::screenAt(QCursor::pos());
+    if (cursorScreen)
+    {
+        return cursorScreen;
+    }
+
+    return QGuiApplication::primaryScreen();
+}
+
+static void centerDialogInAvailableGeometry(QWidget *widget,
+                                            QScreen *targetScreen,
+                                            const QSize &preferredClientSize)
+{
+    if (!widget || !targetScreen)
+    {
+        return;
+    }
+
+    const QRect available = targetScreen->availableGeometry();
+    const int clientWidth = qMin(preferredClientSize.width(), qMax(1, available.width() - 80));
+    const int clientHeight = qMin(preferredClientSize.height(), qMax(1, available.height() - 80));
+    widget->setFixedSize(clientWidth, clientHeight);
+    widget->winId();
+
+    QSize frameSize = widget->frameGeometry().size();
+    QWindow *window = widget->windowHandle();
+
+    if (window)
+    {
+        const QMargins frameMargins = window->frameMargins();
+        const QSize marginsFrameSize(clientWidth + frameMargins.left() + frameMargins.right(),
+                                     clientHeight + frameMargins.top() + frameMargins.bottom());
+        if (marginsFrameSize.width() > clientWidth && marginsFrameSize.height() > clientHeight)
+        {
+            frameSize = marginsFrameSize;
+        }
+    }
+
+    if (!frameSize.isValid() || frameSize.isEmpty())
+    {
+        frameSize = QSize(clientWidth, clientHeight);
+    }
+
+    QPoint frameTopLeft(available.left() + (available.width() - frameSize.width()) / 2,
+                        available.top() + (available.height() - frameSize.height()) / 2);
+    frameTopLeft.setX(qBound(available.left(),
+                             frameTopLeft.x(),
+                             qMax(available.left(), available.right() - frameSize.width() + 1)));
+    frameTopLeft.setY(qBound(available.top(),
+                             frameTopLeft.y(),
+                             qMax(available.top(), available.bottom() - frameSize.height() + 1)));
+
+    if (window)
+    {
+        window->setFramePosition(frameTopLeft);
+    }
+    else
+    {
+        widget->move(frameTopLeft);
+    }
+}
+
 // 欢迎对话框
 class WelcomeDialog : public QDialog
 {
     Q_OBJECT
+
 public:
     explicit WelcomeDialog(QWidget *parent = nullptr);
     ~WelcomeDialog();
@@ -2076,6 +3278,14 @@ public:
         return selectedFile;
     }
 
+    int getSelectedNewFileType() const
+    {
+        return selectedNewFileType;
+    }
+
+protected:
+    void showEvent(QShowEvent *event) override;
+
 private slots:
     void onNewProjectClicked();
     void onOpenProjectClicked();
@@ -2083,6 +3293,9 @@ private slots:
     void onRecentFileClicked(QListWidgetItem *item);
     void onThemeToggled(bool dark);
     void clearRecentFiles();
+    void onBackToWelcomeClicked();
+    void onConfirmNewFileClicked();
+    void onNewFileTypeSelectionChanged();
 
 private:
     void setupUI();
@@ -2090,37 +3303,72 @@ private:
     void loadRecentFiles();
     void saveRecentFiles();
     void addToRecentFiles(const QString &filePath);
+    QWidget *createWelcomePage();
+    QWidget *createNewFilePage();
+    void switchPageWithAnimation(int index, int direction);
+    void applyNewFileFilters();
+    void selectNewFileType(int type);
+    void addNewFileTypeItem(QListWidget *list,
+                            int type,
+                            const QString &title,
+                            const QString &description,
+                            const QString &language,
+                            const QString &platform,
+                            const QString &category,
+                            const QString &badgeText);
 
-    QListWidget *recentList;
-    QPushButton *newFileBtn;
-    QPushButton *openFileBtn;
-    QPushButton *quickStartBtn;
-    QPushButton *clearRecentBtn;
-    QCheckBox *darkThemeCheck;
+    QStackedWidget *pageStack = nullptr;
+    QListWidget *recentList = nullptr;
+    QPushButton *newFileBtn = nullptr;
+    QPushButton *openFileBtn = nullptr;
+    QPushButton *quickStartBtn = nullptr;
+    QPushButton *clearRecentBtn = nullptr;
+    QCheckBox *darkThemeCheck = nullptr;
+    QLineEdit *newFileSearchEdit = nullptr;
+    QComboBox *newFileLanguageCombo = nullptr;
+    QComboBox *newFilePlatformCombo = nullptr;
+    QComboBox *newFileTypeCombo = nullptr;
+    QListWidget *newFileTypeList = nullptr;
+    QPushButton *backToWelcomeBtn = nullptr;
+    QPushButton *confirmNewFileBtn = nullptr;
 
     QStringList recentFiles;
     QString selectedFile;
+    int selectedNewFileType = -1;
+    ThemeMode welcomeThemeMode = ThemeMode::Dark;
 };
 
 WelcomeDialog::WelcomeDialog(QWidget *parent)
-    : QDialog(parent), selectedFile("")
+    : QDialog(parent),
+      selectedFile("")
 {
+    welcomeThemeMode = storedThemeMode();
     setWindowTitle("欢迎使用 Compiler IDE " + IDE_VERSION);
-    setFixedSize(800, 600);
     setModal(true);
+    setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+    resize(1040, 680);
 
     setupUI();
     setupConnections();
     loadRecentFiles();
-
-    QScreen *screen = QGuiApplication::primaryScreen();
-    QRect screenGeometry = screen->geometry();
-    move(screenGeometry.center() - rect().center());
 }
 
 WelcomeDialog::~WelcomeDialog()
 {
     saveRecentFiles();
+}
+
+void WelcomeDialog::showEvent(QShowEvent *event)
+{
+    QDialog::showEvent(event);
+
+    auto recenter = [this]()
+    {
+        centerDialogInAvailableGeometry(this, dialogTargetScreen(this), QSize(1040, 680));
+    };
+
+    QTimer::singleShot(0, this, recenter);
+    QTimer::singleShot(80, this, recenter);
 }
 
 void WelcomeDialog::setupUI()
@@ -2129,49 +3377,69 @@ void WelcomeDialog::setupUI()
     mainLayout->setSpacing(0);
     mainLayout->setContentsMargins(0, 0, 0, 0);
 
-    QWidget *headerWidget = new QWidget(this);
-    headerWidget->setFixedHeight(120);
+    pageStack = new QStackedWidget(this);
+    pageStack->setContentsMargins(0, 0, 0, 0);
+    pageStack->addWidget(createWelcomePage());
+    pageStack->addWidget(createNewFilePage());
+    pageStack->setCurrentIndex(0);
+
+    mainLayout->addWidget(pageStack);
+}
+
+QWidget *WelcomeDialog::createWelcomePage()
+{
+    const NewFileThemeColors colors = newFileThemeColors(welcomeThemeMode);
+    QWidget *page = new QWidget(this);
+    QVBoxLayout *mainLayout = new QVBoxLayout(page);
+    mainLayout->setSpacing(0);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+
+    QWidget *headerWidget = new QWidget(page);
+    headerWidget->setFixedHeight(126);
     headerWidget->setStyleSheet(
         "background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
-        "stop:0 #2E86AB, stop:0.3 #A23B72, stop:0.6 #F18F01, stop:1 #C73E1D);"
-        "border-top-left-radius: 10px;"
-        "border-top-right-radius: 10px;");
+        "stop:0 #2E86AB, stop:0.3 #A23B72, stop:0.6 #F18F01, stop:1 #C73E1D);");
 
     QHBoxLayout *headerLayout = new QHBoxLayout(headerWidget);
-    headerLayout->setContentsMargins(40, 0, 40, 0);
+    headerLayout->setContentsMargins(52, 0, 52, 0);
 
     QLabel *titleLabel = new QLabel("Compiler IDE " + IDE_VERSION, headerWidget);
-    titleLabel->setStyleSheet("color: white; font-size: 28px; font-weight: bold; background: transparent;");
+    titleLabel->setStyleSheet("color: white; font-size: 30px; font-weight: bold; background: transparent;");
 
     QLabel *subtitleLabel = new QLabel("现代化 C++ 开发环境", headerWidget);
-    subtitleLabel->setStyleSheet("color: rgba(255,255,255,0.8); font-size: 14px; background: transparent;");
+    subtitleLabel->setStyleSheet("color: rgba(255,255,255,0.82); font-size: 14px; background: transparent;");
 
-    QVBoxLayout *textLayout = new QVBoxLayout();
+    QVBoxLayout *textLayout = new QVBoxLayout;
     textLayout->addWidget(titleLabel);
     textLayout->addWidget(subtitleLabel);
-    textLayout->setSpacing(5);
+    textLayout->setSpacing(6);
 
     headerLayout->addLayout(textLayout);
     headerLayout->addStretch();
 
-    QWidget *contentWidget = new QWidget(this);
-    contentWidget->setStyleSheet("background: #2D3047; border-bottom-left-radius: 10px; border-bottom-right-radius: 10px;");
+    QWidget *contentWidget = new QWidget(page);
+    contentWidget->setStyleSheet(QString("background: %1;").arg(colors.welcomeBackground));
 
     QHBoxLayout *contentLayout = new QHBoxLayout(contentWidget);
-    contentLayout->setContentsMargins(40, 30, 40, 30);
-    contentLayout->setSpacing(40);
+    contentLayout->setContentsMargins(52, 34, 52, 38);
+    contentLayout->setSpacing(52);
 
     QWidget *quickActionsWidget = new QWidget(contentWidget);
-    quickActionsWidget->setFixedWidth(300);
+    quickActionsWidget->setFixedWidth(330);
+    quickActionsWidget->setStyleSheet("background: transparent;");
 
     QVBoxLayout *actionsLayout = new QVBoxLayout(quickActionsWidget);
-    actionsLayout->setSpacing(15);
+    actionsLayout->setContentsMargins(0, 0, 0, 0);
+    actionsLayout->setSpacing(16);
 
     QLabel *actionsTitle = new QLabel("快速开始", quickActionsWidget);
-    actionsTitle->setStyleSheet("color: #E0E0E0; font-size: 20px; font-weight: bold; margin-bottom: 10px;");
+    actionsTitle->setStyleSheet(
+        QString("color: %1; font-size: 21px; font-weight: bold; margin-bottom: 8px; background: transparent;")
+            .arg(colors.titleColor));
 
     newFileBtn = new QPushButton("新建文件", quickActionsWidget);
-    newFileBtn->setFixedHeight(50);
+    newFileBtn->setFixedHeight(54);
+    newFileBtn->setCursor(Qt::PointingHandCursor);
     newFileBtn->setStyleSheet(
         "QPushButton {"
         "    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2E86AB, stop:1 #A23B72);"
@@ -2189,7 +3457,8 @@ void WelcomeDialog::setupUI()
         "}");
 
     openFileBtn = new QPushButton("打开文件", quickActionsWidget);
-    openFileBtn->setFixedHeight(50);
+    openFileBtn->setFixedHeight(54);
+    openFileBtn->setCursor(Qt::PointingHandCursor);
     openFileBtn->setStyleSheet(
         "QPushButton {"
         "    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #F18F01, stop:1 #C73E1D);"
@@ -2207,23 +3476,31 @@ void WelcomeDialog::setupUI()
         "}");
 
     quickStartBtn = new QPushButton("快速开始", quickActionsWidget);
-    quickStartBtn->setFixedHeight(50);
+    quickStartBtn->setFixedHeight(54);
+    quickStartBtn->setCursor(Qt::PointingHandCursor);
     quickStartBtn->setStyleSheet(
-        "QPushButton {"
-        "    background: #404764;"
-        "    color: white;"
-        "    border: 2px solid #5A5F7A;"
-        "    border-radius: 8px;"
-        "    font-size: 14px;"
-        "    font-weight: bold;"
-        "}"
-        "QPushButton:hover {"
-        "    background: #4A5070;"
-        "    border-color: #6B7190;"
-        "}"
-        "QPushButton:pressed {"
-        "    background: #363A52;"
-        "}");
+        QString(
+            "QPushButton {"
+            "    background: %1;"
+            "    color: %2;"
+            "    border: 1px solid %3;"
+            "    border-radius: 8px;"
+            "    font-size: 14px;"
+            "    font-weight: bold;"
+            "}"
+            "QPushButton:hover {"
+            "    background: %4;"
+            "    border-color: %5;"
+            "}"
+            "QPushButton:pressed {"
+            "    background: %6;"
+            "}")
+            .arg(colors.neutralButtonBackground)
+            .arg(colors.titleColor)
+            .arg(colors.borderColor)
+            .arg(colors.neutralButtonHoverBackground)
+            .arg(colors.hoverBorderColor)
+            .arg(colors.neutralButtonPressedBackground));
 
     actionsLayout->addWidget(actionsTitle);
     actionsLayout->addWidget(newFileBtn);
@@ -2232,15 +3509,20 @@ void WelcomeDialog::setupUI()
     actionsLayout->addStretch();
 
     QWidget *recentWidget = new QWidget(contentWidget);
+    recentWidget->setStyleSheet("background: transparent;");
     QVBoxLayout *recentLayout = new QVBoxLayout(recentWidget);
+    recentLayout->setContentsMargins(0, 0, 0, 0);
     recentLayout->setSpacing(15);
 
-    QHBoxLayout *recentHeaderLayout = new QHBoxLayout();
+    QHBoxLayout *recentHeaderLayout = new QHBoxLayout;
     QLabel *recentTitle = new QLabel("最近文件", recentWidget);
-    recentTitle->setStyleSheet("color: #E0E0E0; font-size: 20px; font-weight: bold;");
+    recentTitle->setStyleSheet(
+        QString("color: %1; font-size: 21px; font-weight: bold; background: transparent;")
+            .arg(colors.titleColor));
 
     clearRecentBtn = new QPushButton("清空列表", recentWidget);
-    clearRecentBtn->setFixedSize(80, 25);
+    clearRecentBtn->setFixedSize(84, 28);
+    clearRecentBtn->setCursor(Qt::PointingHandCursor);
     clearRecentBtn->setStyleSheet(
         "QPushButton {"
         "    background: transparent;"
@@ -2250,10 +3532,10 @@ void WelcomeDialog::setupUI()
         "    font-size: 11px;"
         "}"
         "QPushButton:hover {"
-        "    background: rgba(241, 143, 1, 0.2);"
+        "    background: rgba(241, 143, 1, 0.16);"
         "}"
         "QPushButton:pressed {"
-        "    background: rgba(241, 143, 1, 0.3);"
+        "    background: rgba(241, 143, 1, 0.26);"
         "}");
 
     recentHeaderLayout->addWidget(recentTitle);
@@ -2261,38 +3543,530 @@ void WelcomeDialog::setupUI()
     recentHeaderLayout->addWidget(clearRecentBtn);
 
     recentList = new QListWidget(recentWidget);
+    recentList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     recentList->setStyleSheet(
-        "QListWidget {"
-        "    background: #404764;"
-        "    border: 1px solid #5A5F7A;"
-        "    border-radius: 8px;"
-        "    color: #E0E0E0;"
-        "    font-size: 12px;"
-        "    outline: none;"
-        "}"
-        "QListWidget::item {"
-        "    border-bottom: 1px solid #5A5F7A;"
-        "    padding: 12px;"
-        "}"
-        "QListWidget::item:selected {"
-        "    background: #2E86AB;"
-        "    color: white;"
-        "}"
-        "QListWidget::item:hover {"
-        "    background: #4A5070;"
-        "}"
-        "QListWidget::item:last {"
-        "    border-bottom: none;"
-        "}");
+        QString(
+            "QListWidget {"
+            "    background: %1;"
+            "    border: 1px solid %2;"
+            "    border-radius: 8px;"
+            "    color: %3;"
+            "    font-size: 12px;"
+            "    outline: none;"
+            "}"
+            "QListWidget::item {"
+            "    border-bottom: 1px solid %2;"
+            "    padding: 12px;"
+            "}"
+            "QListWidget::item:selected {"
+            "    background: %4;"
+            "    color: %3;"
+            "}"
+            "QListWidget::item:hover {"
+            "    background: %5;"
+            "}")
+            .arg(colors.surfaceBackground)
+            .arg(colors.borderColor)
+            .arg(colors.titleColor)
+            .arg(colors.itemSelectedBackground)
+            .arg(colors.itemHoverBackground));
 
     recentLayout->addLayout(recentHeaderLayout);
     recentLayout->addWidget(recentList);
 
     contentLayout->addWidget(quickActionsWidget);
-    contentLayout->addWidget(recentWidget);
+    contentLayout->addWidget(recentWidget, 1);
 
     mainLayout->addWidget(headerWidget);
-    mainLayout->addWidget(contentWidget);
+    mainLayout->addWidget(contentWidget, 1);
+
+    return page;
+}
+
+QWidget *WelcomeDialog::createNewFilePage()
+{
+    const NewFileThemeColors colors = newFileThemeColors(welcomeThemeMode);
+    QWidget *page = new QWidget(this);
+    page->setStyleSheet(QString("background: %1;").arg(colors.pageBackground));
+
+    QVBoxLayout *pageLayout = new QVBoxLayout(page);
+    pageLayout->setContentsMargins(0, 0, 0, 0);
+    pageLayout->setSpacing(0);
+
+    QWidget *bodyWidget = new QWidget(page);
+    bodyWidget->setStyleSheet(QString("background: %1;").arg(colors.pageBackground));
+    QVBoxLayout *bodyLayout = new QVBoxLayout(bodyWidget);
+    bodyLayout->setContentsMargins(30, 28, 30, 18);
+    bodyLayout->setSpacing(18);
+
+    QHBoxLayout *titleRow = new QHBoxLayout;
+    titleRow->setSpacing(24);
+
+    QLabel *titleLabel = new QLabel(tr("创建新文件"), bodyWidget);
+    titleLabel->setStyleSheet(
+        QString(
+            "QLabel {"
+            "    color: %1;"
+            "    font-size: 28px;"
+            "    font-weight: 600;"
+            "    background: transparent;"
+            "}")
+            .arg(colors.titleColor));
+
+    newFileSearchEdit = new QLineEdit(bodyWidget);
+    newFileSearchEdit->setFixedHeight(42);
+    newFileSearchEdit->setMinimumWidth(360);
+    newFileSearchEdit->setMaximumWidth(520);
+    newFileSearchEdit->setPlaceholderText(tr("搜索文件类型 (Alt+S)"));
+    newFileSearchEdit->setClearButtonEnabled(true);
+    newFileSearchEdit->setStyleSheet(
+        QString(
+            "QLineEdit {"
+            "    background: %1;"
+            "    color: %2;"
+            "    border: 1px solid %3;"
+            "    border-radius: 3px;"
+            "    padding: 0 12px;"
+            "    font-size: 14px;"
+            "}"
+            "QLineEdit:focus {"
+            "    border: 1px solid %4;"
+            "}"
+            "QLineEdit::placeholder {"
+            "    color: %5;"
+            "}")
+            .arg(colors.inputBackground)
+            .arg(colors.titleColor)
+            .arg(colors.borderColor)
+            .arg(colors.accentColor)
+            .arg(colors.secondaryColor));
+
+    titleRow->addWidget(titleLabel);
+    titleRow->addStretch();
+    titleRow->addWidget(newFileSearchEdit, 1);
+    bodyLayout->addLayout(titleRow);
+
+    QHBoxLayout *contentRow = new QHBoxLayout;
+    contentRow->setSpacing(26);
+
+    QWidget *recentTypesPanel = new QWidget(bodyWidget);
+    recentTypesPanel->setFixedWidth(300);
+    recentTypesPanel->setStyleSheet("background: transparent;");
+    QVBoxLayout *recentTypesLayout = new QVBoxLayout(recentTypesPanel);
+    recentTypesLayout->setContentsMargins(0, 2, 0, 0);
+    recentTypesLayout->setSpacing(12);
+
+    QLabel *recentTypesTitle = new QLabel(tr("常用文件类型"), recentTypesPanel);
+    recentTypesTitle->setStyleSheet(
+        QString(
+            "QLabel {"
+            "    color: %1;"
+            "    font-size: 20px;"
+            "    font-weight: 600;"
+            "    background: transparent;"
+            "}")
+            .arg(colors.titleColor));
+
+    const QString quickButtonStyle = QString(
+                                         "QPushButton {"
+                                         "    text-align: left;"
+                                         "    padding: 0 18px;"
+                                         "    color: %1;"
+                                         "    background: %2;"
+                                         "    border: 1px solid %3;"
+                                         "    border-radius: 2px;"
+                                         "    font-size: 15px;"
+                                         "}"
+                                         "QPushButton:hover {"
+                                         "    background: %4;"
+                                         "    border-color: %5;"
+                                         "}")
+                                         .arg(colors.titleColor)
+                                         .arg(colors.surfaceBackground)
+                                         .arg(colors.borderColor)
+                                         .arg(colors.itemHoverBackground)
+                                         .arg(colors.hoverBorderColor);
+
+    QList<QPair<QPushButton *, int>> recentTypeButtons;
+    recentTypesLayout->addWidget(recentTypesTitle);
+
+    const QList<int> recentTypes = recentNewFileTypes();
+    if (recentTypes.isEmpty())
+    {
+        QLabel *emptyRecentLabel = new QLabel(tr("暂无最近使用的文件类型"), recentTypesPanel);
+        emptyRecentLabel->setWordWrap(true);
+        emptyRecentLabel->setStyleSheet(
+            QString(
+                "QLabel {"
+                "    color: %1;"
+                "    background: transparent;"
+                "    font-size: 13px;"
+                "    padding: 10px 2px;"
+                "}")
+                .arg(colors.secondaryColor));
+        recentTypesLayout->addWidget(emptyRecentLabel);
+    }
+    else
+    {
+        for (int i = 0; i < recentTypes.size() && i < 5; ++i)
+        {
+            const int type = recentTypes.at(i);
+            QPushButton *button = new QPushButton(newFileTypeDisplayName(type), recentTypesPanel);
+            button->setFixedHeight(62);
+            button->setCursor(Qt::PointingHandCursor);
+            button->setStyleSheet(quickButtonStyle);
+            button->setIcon(QIcon(newFileTypeIconPath(type, welcomeThemeMode)));
+            button->setIconSize(QSize(28, 28));
+            recentTypesLayout->addWidget(button);
+            recentTypeButtons.append(qMakePair(button, type));
+        }
+    }
+
+    recentTypesLayout->addStretch();
+
+    QWidget *browserPanel = new QWidget(bodyWidget);
+    browserPanel->setStyleSheet("background: transparent;");
+    QVBoxLayout *browserLayout = new QVBoxLayout(browserPanel);
+    browserLayout->setContentsMargins(0, 0, 0, 0);
+    browserLayout->setSpacing(14);
+
+    QHBoxLayout *filterRow = new QHBoxLayout;
+    filterRow->setSpacing(12);
+
+    newFileLanguageCombo = new NewFileFilterComboBox(browserPanel);
+    newFileLanguageCombo->addItem(tr("所有语言"));
+    newFileLanguageCombo->addItem(tr("C++"));
+    newFileLanguageCombo->addItem(tr("Markdown"));
+
+    newFilePlatformCombo = new NewFileFilterComboBox(browserPanel);
+    newFilePlatformCombo->addItem(tr("所有平台"));
+    newFilePlatformCombo->addItem(tr("Windows"));
+    newFilePlatformCombo->addItem(tr("跨平台"));
+
+    newFileTypeCombo = new NewFileFilterComboBox(browserPanel);
+    newFileTypeCombo->addItem(tr("所有文件类型"));
+    newFileTypeCombo->addItem(tr("源代码"));
+    newFileTypeCombo->addItem(tr("图形项目"));
+    newFileTypeCombo->addItem(tr("文档"));
+
+    configureNewFileCombo(static_cast<NewFileFilterComboBox *>(newFileLanguageCombo), colors);
+    configureNewFileCombo(static_cast<NewFileFilterComboBox *>(newFilePlatformCombo), colors);
+    configureNewFileCombo(static_cast<NewFileFilterComboBox *>(newFileTypeCombo), colors);
+
+    filterRow->addWidget(newFileLanguageCombo, 1);
+    filterRow->addWidget(newFilePlatformCombo, 1);
+    filterRow->addWidget(newFileTypeCombo, 1);
+    browserLayout->addLayout(filterRow);
+
+    newFileTypeList = new QListWidget(browserPanel);
+    newFileTypeList->setSelectionMode(QAbstractItemView::SingleSelection);
+    newFileTypeList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    newFileTypeList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    newFileTypeList->setSpacing(2);
+    newFileTypeList->setStyleSheet(
+        QString(
+            "QListWidget {"
+            "    background: %1;"
+            "    border: none;"
+            "    outline: none;"
+            "}"
+            "QListWidget::item {"
+            "    background: %2;"
+            "    border: 1px solid transparent;"
+            "    margin: 3px 0;"
+            "}"
+            "QListWidget::item:hover {"
+            "    background: %3;"
+            "    border-color: %4;"
+            "}"
+            "QListWidget::item:selected {"
+            "    background: %5;"
+            "    border: 1px solid %6;"
+            "}")
+            .arg(colors.pageBackground)
+            .arg(colors.itemBackground)
+            .arg(colors.itemHoverBackground)
+            .arg(colors.borderColor)
+            .arg(colors.itemSelectedBackground)
+            .arg(colors.accentColor));
+
+    addNewFileTypeItem(newFileTypeList,
+                       0,
+                       tr("C++ 源文件"),
+                       tr("创建标准的 C++ 源代码文件"),
+                       tr("C++"),
+                       tr("跨平台"),
+                       tr("源代码"),
+                       tr("C++"));
+    addNewFileTypeItem(newFileTypeList,
+                       1,
+                       tr("EasyX 图形项目"),
+                       tr("创建带 EasyX 图形库模板的 C++ 文件"),
+                       tr("C++"),
+                       tr("Windows"),
+                       tr("图形项目"),
+                       tr("EX"));
+    addNewFileTypeItem(newFileTypeList,
+                       2,
+                       tr("Markdown 文档"),
+                       tr("创建 Markdown 文档并使用实时预览"),
+                       tr("Markdown"),
+                       tr("跨平台"),
+                       tr("文档"),
+                       tr("MD"));
+
+    browserLayout->addWidget(newFileTypeList, 1);
+
+    contentRow->addWidget(recentTypesPanel);
+    contentRow->addWidget(browserPanel, 1);
+    bodyLayout->addLayout(contentRow, 1);
+
+    QWidget *footerWidget = new QWidget(page);
+    footerWidget->setFixedHeight(76);
+    footerWidget->setStyleSheet(
+        QString(
+            "QWidget {"
+            "    background: %1;"
+            "    border-top: 1px solid %2;"
+            "}")
+            .arg(colors.footerBackground)
+            .arg(colors.borderColor));
+
+    QHBoxLayout *footerLayout = new QHBoxLayout(footerWidget);
+    footerLayout->setContentsMargins(28, 14, 28, 14);
+    footerLayout->setSpacing(12);
+    footerLayout->addStretch();
+
+    backToWelcomeBtn = new QPushButton(tr("上一步"), footerWidget);
+    backToWelcomeBtn->setFixedSize(154, 42);
+    backToWelcomeBtn->setCursor(Qt::PointingHandCursor);
+    backToWelcomeBtn->setStyleSheet(
+        QString(
+            "QPushButton {"
+            "    color: %1;"
+            "    background: %2;"
+            "    border: 1px solid %3;"
+            "    border-radius: 5px;"
+            "    font-size: 14px;"
+            "}"
+            "QPushButton:hover {"
+            "    background: %4;"
+            "}"
+            "QPushButton:pressed {"
+            "    background: %5;"
+            "}")
+            .arg(colors.titleColor)
+            .arg(colors.neutralButtonBackground)
+            .arg(colors.borderColor)
+            .arg(colors.neutralButtonHoverBackground)
+            .arg(colors.neutralButtonPressedBackground));
+
+    confirmNewFileBtn = new QPushButton(tr("确定"), footerWidget);
+    confirmNewFileBtn->setFixedSize(154, 42);
+    confirmNewFileBtn->setCursor(Qt::PointingHandCursor);
+    confirmNewFileBtn->setEnabled(false);
+    confirmNewFileBtn->setStyleSheet(
+        QString(
+            "QPushButton {"
+            "    color: white;"
+            "    background: %1;"
+            "    border: 1px solid %1;"
+            "    border-radius: 5px;"
+            "    font-size: 14px;"
+            "}"
+            "QPushButton:hover {"
+            "    background: %2;"
+            "}"
+            "QPushButton:pressed {"
+            "    background: %3;"
+            "}"
+            "QPushButton:disabled {"
+            "    color: %4;"
+            "    background: %5;"
+            "    border-color: %6;"
+            "}")
+            .arg(colors.accentColor)
+            .arg(colors.accentHoverColor)
+            .arg(colors.accentPressedColor)
+            .arg(colors.disabledTextColor)
+            .arg(colors.disabledBackground)
+            .arg(colors.borderColor));
+
+    footerLayout->addWidget(backToWelcomeBtn);
+    footerLayout->addWidget(confirmNewFileBtn);
+
+    pageLayout->addWidget(bodyWidget, 1);
+    pageLayout->addWidget(footerWidget);
+
+    connect(newFileSearchEdit, &QLineEdit::textChanged, this, [this](const QString &)
+            {
+                applyNewFileFilters();
+            });
+    connect(newFileLanguageCombo, &QComboBox::currentTextChanged, this, [this](const QString &)
+            {
+                applyNewFileFilters();
+            });
+    connect(newFilePlatformCombo, &QComboBox::currentTextChanged, this, [this](const QString &)
+            {
+                applyNewFileFilters();
+            });
+    connect(newFileTypeCombo, &QComboBox::currentTextChanged, this, [this](const QString &)
+            {
+                applyNewFileFilters();
+            });
+    connect(newFileTypeList, &QListWidget::itemSelectionChanged,
+            this, &WelcomeDialog::onNewFileTypeSelectionChanged);
+    connect(newFileTypeList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *)
+            {
+                onConfirmNewFileClicked();
+            });
+    connect(backToWelcomeBtn, &QPushButton::clicked,
+            this, &WelcomeDialog::onBackToWelcomeClicked);
+    connect(confirmNewFileBtn, &QPushButton::clicked,
+            this, &WelcomeDialog::onConfirmNewFileClicked);
+    for (const QPair<QPushButton *, int> &entry : recentTypeButtons)
+    {
+        QPushButton *button = entry.first;
+        const int type = entry.second;
+        connect(button, &QPushButton::clicked, this, [this, type]()
+                {
+                    selectNewFileType(type);
+                });
+    }
+
+    QShortcut *searchShortcut = new QShortcut(QKeySequence("Alt+S"), page);
+    connect(searchShortcut, &QShortcut::activated, this, [this]()
+            {
+                if (newFileSearchEdit)
+                {
+                    newFileSearchEdit->setFocus();
+                    newFileSearchEdit->selectAll();
+                }
+            });
+
+    return page;
+}
+
+void WelcomeDialog::addNewFileTypeItem(QListWidget *list,
+                                       int type,
+                                       const QString &title,
+                                       const QString &description,
+                                       const QString &language,
+                                       const QString &platform,
+                                       const QString &category,
+                                       const QString &badgeText)
+{
+    if (!list)
+    {
+        return;
+    }
+
+    const NewFileThemeColors colors = newFileThemeColors(welcomeThemeMode);
+    QListWidgetItem *item = new QListWidgetItem(list);
+    item->setData(Qt::UserRole, type);
+    item->setData(Qt::UserRole + 1, title);
+    item->setData(Qt::UserRole + 2, description);
+    item->setData(Qt::UserRole + 3, language);
+    item->setData(Qt::UserRole + 4, platform);
+    item->setData(Qt::UserRole + 5, category);
+    item->setSizeHint(QSize(0, 98));
+
+    QWidget *rowWidget = new QWidget(list);
+    rowWidget->setAttribute(Qt::WA_TransparentForMouseEvents);
+    rowWidget->setStyleSheet("background: transparent;");
+
+    QHBoxLayout *rowLayout = new QHBoxLayout(rowWidget);
+    rowLayout->setContentsMargins(18, 11, 18, 11);
+    rowLayout->setSpacing(16);
+
+    QLabel *iconLabel = new QLabel(rowWidget);
+    iconLabel->setFixedSize(52, 52);
+    iconLabel->setAlignment(Qt::AlignCenter);
+    iconLabel->setStyleSheet("background: transparent; border: none;");
+    const QIcon typeIcon(newFileTypeIconPath(type, welcomeThemeMode));
+
+    if (!typeIcon.isNull())
+    {
+        iconLabel->setPixmap(typeIcon.pixmap(QSize(40, 40)));
+    }
+    else
+    {
+        iconLabel->setText(badgeText);
+        iconLabel->setStyleSheet(
+            QString(
+                "QLabel {"
+                "    color: %1;"
+                "    background: %2;"
+                "    border: 1px solid %3;"
+                "    border-radius: 4px;"
+                "    font-size: 14px;"
+                "    font-weight: 700;"
+                "}")
+                .arg(colors.titleColor)
+                .arg(colors.surfaceBackground)
+                .arg(colors.borderColor));
+    }
+
+    QVBoxLayout *textLayout = new QVBoxLayout;
+    textLayout->setContentsMargins(0, 0, 0, 0);
+    textLayout->setSpacing(5);
+
+    QLabel *titleLabel = new QLabel(title, rowWidget);
+    titleLabel->setStyleSheet(
+        QString(
+            "QLabel {"
+            "    color: %1;"
+            "    background: transparent;"
+            "    font-size: 16px;"
+            "    font-weight: 600;"
+            "}")
+            .arg(colors.titleColor));
+
+    QLabel *descriptionLabel = new QLabel(description, rowWidget);
+    descriptionLabel->setStyleSheet(
+        QString(
+            "QLabel {"
+            "    color: %1;"
+            "    background: transparent;"
+            "    font-size: 12px;"
+            "}")
+            .arg(colors.secondaryColor));
+
+    QHBoxLayout *tagLayout = new QHBoxLayout;
+    tagLayout->setContentsMargins(0, 0, 0, 0);
+    tagLayout->setSpacing(8);
+
+    const QString tagStyle = QString(
+                                 "QLabel {"
+                                 "    color: %1;"
+                                 "    background: %2;"
+                                 "    border-radius: 3px;"
+                                 "    padding: 3px 8px;"
+                                 "    font-size: 11px;"
+                                 "}")
+                                 .arg(colors.tagTextColor)
+                                 .arg(colors.tagBackground);
+
+    QLabel *languageTag = new QLabel(language, rowWidget);
+    QLabel *platformTag = new QLabel(platform, rowWidget);
+    QLabel *categoryTag = new QLabel(category, rowWidget);
+    languageTag->setStyleSheet(tagStyle);
+    platformTag->setStyleSheet(tagStyle);
+    categoryTag->setStyleSheet(tagStyle);
+
+    tagLayout->addWidget(languageTag);
+    tagLayout->addWidget(platformTag);
+    tagLayout->addWidget(categoryTag);
+    tagLayout->addStretch();
+
+    textLayout->addWidget(titleLabel);
+    textLayout->addWidget(descriptionLabel);
+    textLayout->addLayout(tagLayout);
+
+    rowLayout->addWidget(iconLabel);
+    rowLayout->addLayout(textLayout, 1);
+
+    list->setItemWidget(item, rowWidget);
 }
 
 void WelcomeDialog::setupConnections()
@@ -2302,6 +4076,253 @@ void WelcomeDialog::setupConnections()
     connect(quickStartBtn, &QPushButton::clicked, this, &WelcomeDialog::onOpenFileClicked);
     connect(recentList, &QListWidget::itemClicked, this, &WelcomeDialog::onRecentFileClicked);
     connect(clearRecentBtn, &QPushButton::clicked, this, &WelcomeDialog::clearRecentFiles);
+}
+
+void WelcomeDialog::switchPageWithAnimation(int index, int direction)
+{
+    if (!pageStack || index < 0 || index >= pageStack->count() || pageStack->currentIndex() == index)
+    {
+        return;
+    }
+
+    QWidget *existingOverlayWidget =
+        pageStack->findChild<QWidget *>("WelcomePageTransitionOverlay",
+                                        Qt::FindDirectChildrenOnly);
+    if (existingOverlayWidget)
+    {
+        delete existingOverlayWidget;
+    }
+
+    QVariantAnimation *existingAnimation =
+        pageStack->findChild<QVariantAnimation *>("WelcomePageTransitionAnimation",
+                                                  Qt::FindDirectChildrenOnly);
+    if (existingAnimation)
+    {
+        existingAnimation->stop();
+        delete existingAnimation;
+    }
+
+    const QPixmap fromPixmap = pageStack->grab();
+    pageStack->setCurrentIndex(index);
+    const QPixmap toPixmap = pageStack->grab();
+
+    if (fromPixmap.isNull() || toPixmap.isNull())
+    {
+        return;
+    }
+
+    SettingsPageTransitionOverlay *overlay =
+        new SettingsPageTransitionOverlay(fromPixmap,
+                                          toPixmap,
+                                          direction >= 0 ? 1 : -1,
+                                          pageStack);
+    overlay->setObjectName("WelcomePageTransitionOverlay");
+    overlay->setGeometry(pageStack->rect());
+    overlay->setProgress(0.0);
+    overlay->show();
+    overlay->raise();
+
+    QVariantAnimation *animation = new QVariantAnimation(pageStack);
+    animation->setObjectName("WelcomePageTransitionAnimation");
+    animation->setDuration(175);
+    animation->setStartValue(0.0);
+    animation->setEndValue(1.0);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+
+    connect(animation, &QVariantAnimation::valueChanged, overlay,
+            [overlay](const QVariant &value)
+            {
+                overlay->setProgress(value.toReal());
+            });
+    connect(animation, &QVariantAnimation::finished, pageStack,
+            [overlay, animation]()
+            {
+                overlay->deleteLater();
+                animation->deleteLater();
+            });
+
+    animation->start();
+}
+
+void WelcomeDialog::applyNewFileFilters()
+{
+    if (!newFileTypeList ||
+        !newFileSearchEdit ||
+        !newFileLanguageCombo ||
+        !newFilePlatformCombo ||
+        !newFileTypeCombo)
+    {
+        return;
+    }
+
+    const QString searchText = newFileSearchEdit->text().trimmed();
+    const QString languageFilter = newFileLanguageCombo->currentText();
+    const QString platformFilter = newFilePlatformCombo->currentText();
+    const QString typeFilter = newFileTypeCombo->currentText();
+
+    for (int i = 0; i < newFileTypeList->count(); ++i)
+    {
+        QListWidgetItem *item = newFileTypeList->item(i);
+
+        if (!item)
+        {
+            continue;
+        }
+
+        const QString title = item->data(Qt::UserRole + 1).toString();
+        const QString description = item->data(Qt::UserRole + 2).toString();
+        const QString language = item->data(Qt::UserRole + 3).toString();
+        const QString platform = item->data(Qt::UserRole + 4).toString();
+        const QString category = item->data(Qt::UserRole + 5).toString();
+
+        const bool searchMatches =
+            searchText.isEmpty() ||
+            title.contains(searchText, Qt::CaseInsensitive) ||
+            description.contains(searchText, Qt::CaseInsensitive) ||
+            language.contains(searchText, Qt::CaseInsensitive) ||
+            platform.contains(searchText, Qt::CaseInsensitive) ||
+            category.contains(searchText, Qt::CaseInsensitive);
+        const bool languageMatches =
+            languageFilter == tr("所有语言") || language == languageFilter;
+        const bool platformMatches =
+            platformFilter == tr("所有平台") || platform == platformFilter;
+        const bool typeMatches =
+            typeFilter == tr("所有文件类型") || category == typeFilter;
+
+        item->setHidden(!(searchMatches && languageMatches && platformMatches && typeMatches));
+    }
+
+    QListWidgetItem *currentItem = newFileTypeList->currentItem();
+    if (currentItem && currentItem->isHidden())
+    {
+        newFileTypeList->clearSelection();
+        newFileTypeList->setCurrentItem(nullptr);
+    }
+
+    onNewFileTypeSelectionChanged();
+}
+
+void WelcomeDialog::selectNewFileType(int type)
+{
+    if (!newFileTypeList)
+    {
+        return;
+    }
+
+    if (newFileLanguageCombo)
+    {
+        newFileLanguageCombo->setCurrentIndex(0);
+    }
+
+    if (newFilePlatformCombo)
+    {
+        newFilePlatformCombo->setCurrentIndex(0);
+    }
+
+    if (newFileTypeCombo)
+    {
+        newFileTypeCombo->setCurrentIndex(0);
+    }
+
+    if (newFileSearchEdit)
+    {
+        newFileSearchEdit->clear();
+    }
+
+    for (int i = 0; i < newFileTypeList->count(); ++i)
+    {
+        QListWidgetItem *item = newFileTypeList->item(i);
+        if (item && item->data(Qt::UserRole).toInt() == type)
+        {
+            item->setHidden(false);
+            newFileTypeList->setCurrentItem(item);
+            newFileTypeList->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+            return;
+        }
+    }
+}
+
+void WelcomeDialog::onNewProjectClicked()
+{
+    selectedFile.clear();
+    selectedNewFileType = -1;
+
+    if (newFileSearchEdit)
+    {
+        newFileSearchEdit->clear();
+    }
+
+    if (newFileLanguageCombo)
+    {
+        newFileLanguageCombo->setCurrentIndex(0);
+    }
+
+    if (newFilePlatformCombo)
+    {
+        newFilePlatformCombo->setCurrentIndex(0);
+    }
+
+    if (newFileTypeCombo)
+    {
+        newFileTypeCombo->setCurrentIndex(0);
+    }
+
+    if (newFileTypeList)
+    {
+        newFileTypeList->clearSelection();
+        newFileTypeList->setCurrentItem(nullptr);
+    }
+
+    if (confirmNewFileBtn)
+    {
+        confirmNewFileBtn->setEnabled(false);
+    }
+
+    switchPageWithAnimation(1, 1);
+
+    QTimer::singleShot(190, this, [this]()
+                       {
+                           if (newFileSearchEdit)
+                           {
+                               newFileSearchEdit->setFocus();
+                           }
+                       });
+}
+
+void WelcomeDialog::onBackToWelcomeClicked()
+{
+    selectedNewFileType = -1;
+    switchPageWithAnimation(0, -1);
+}
+
+void WelcomeDialog::onConfirmNewFileClicked()
+{
+    if (!newFileTypeList)
+    {
+        return;
+    }
+
+    QListWidgetItem *item = newFileTypeList->currentItem();
+    if (!item || item->isHidden())
+    {
+        return;
+    }
+
+    selectedNewFileType = item->data(Qt::UserRole).toInt();
+    rememberRecentNewFileType(selectedNewFileType);
+    selectedFile = "__NEW_FILE__";
+    accept();
+}
+
+void WelcomeDialog::onNewFileTypeSelectionChanged()
+{
+    if (!confirmNewFileBtn || !newFileTypeList)
+    {
+        return;
+    }
+
+    QListWidgetItem *item = newFileTypeList->currentItem();
+    confirmNewFileBtn->setEnabled(item && !item->isHidden());
 }
 
 void WelcomeDialog::loadRecentFiles()
@@ -2374,12 +4395,6 @@ void WelcomeDialog::addToRecentFiles(const QString &filePath)
     saveRecentFiles();
 }
 
-void WelcomeDialog::onNewProjectClicked()
-{
-    selectedFile = "__NEW_FILE__";
-    accept();
-}
-
 void WelcomeDialog::onOpenProjectClicked()
 {
     QString fileName = QFileDialog::getOpenFileName(this, "打开文件", "",
@@ -2387,6 +4402,7 @@ void WelcomeDialog::onOpenProjectClicked()
     if (!fileName.isEmpty())
     {
         selectedFile = fileName;
+        selectedNewFileType = -1;
         addToRecentFiles(selectedFile);
         accept();
     }
@@ -2395,6 +4411,7 @@ void WelcomeDialog::onOpenProjectClicked()
 void WelcomeDialog::onOpenFileClicked()
 {
     selectedFile = "";
+    selectedNewFileType = -1;
     accept();
 }
 
@@ -2406,6 +4423,7 @@ void WelcomeDialog::onRecentFileClicked(QListWidgetItem *item)
         if (QFile::exists(filePath))
         {
             selectedFile = filePath;
+            selectedNewFileType = -1;
             recentFiles.removeAll(filePath);
             recentFiles.prepend(filePath);
             saveRecentFiles();
@@ -2423,6 +4441,7 @@ void WelcomeDialog::onRecentFileClicked(QListWidgetItem *item)
 
 void WelcomeDialog::onThemeToggled(bool dark)
 {
+    Q_UNUSED(dark);
 }
 
 void WelcomeDialog::clearRecentFiles()
@@ -2447,7 +4466,7 @@ class CppHighlighter : public QSyntaxHighlighter
 public:
     explicit CppHighlighter(QTextDocument *parent = nullptr);
 
-    void setDarkTheme(bool dark);
+    void setDarkTheme(bool dark, bool rehighlightDocument = true);
 
 protected:
     void highlightBlock(const QString &text) override;
@@ -2462,6 +4481,8 @@ private:
 
     QRegularExpression commentStartExpression;
     QRegularExpression commentEndExpression;
+    QRegularExpression stringLiteralExpression;
+    QRegularExpression charLiteralExpression;
 
     QTextCharFormat controlFlowFormat;
 
@@ -2491,20 +4512,22 @@ CppHighlighter::CppHighlighter(QTextDocument *parent)
 
     commentStartExpression = QRegularExpression("/\\*");
     commentEndExpression = QRegularExpression("\\*/");
+    stringLiteralExpression = QRegularExpression("\"(?:[^\"\\\\]|\\\\.)*\"");
+    charLiteralExpression = QRegularExpression("'(?:[^'\\\\]|\\\\.)*'");
 }
 
 void CppHighlighter::highlightBlock(const QString &text)
 {
     QVector<QPair<int, int>> stringRanges;
     QRegularExpressionMatchIterator stringIt =
-        QRegularExpression("\"(?:[^\"\\\\]|\\\\.)*\"").globalMatch(text);
+        stringLiteralExpression.globalMatch(text);
     while (stringIt.hasNext())
     {
         QRegularExpressionMatch match = stringIt.next();
         stringRanges.append(qMakePair(match.capturedStart(), match.capturedLength()));
     }
     QRegularExpressionMatchIterator charIt =
-        QRegularExpression("'(?:[^'\\\\]|\\\\.)*'").globalMatch(text);
+        charLiteralExpression.globalMatch(text);
     while (charIt.hasNext())
     {
         QRegularExpressionMatch match = charIt.next();
@@ -2759,10 +4782,10 @@ void CppHighlighter::rebuildHighlightingRules()
                     << "\\bco_yield\\b" << "\\bco_return\\b" << "\\bimport\\b"
                     << "\\bmodule\\b" << "\\breflexpr\\b" << "\\bauto\\b";
 
-    for (const QString &pattern : keywordPatterns)
+    if (!keywordPatterns.isEmpty())
     {
         HighlightingRule rule;
-        rule.pattern = QRegularExpression(pattern);
+        rule.pattern = QRegularExpression(QString("(?:%1)").arg(keywordPatterns.join('|')));
         rule.format = keywordFormat;
         highlightingRules.append(rule);
     }
@@ -2854,10 +4877,10 @@ void CppHighlighter::rebuildHighlightingRules()
                         << "\\bcontinue\\b" << "\\breturn\\b" << "\\bgoto\\b"
                         << "\\btry\\b" << "\\bcatch\\b" << "\\bthrow\\b";
 
-    for (const QString &pattern : controlFlowKeywords)
+    if (!controlFlowKeywords.isEmpty())
     {
         HighlightingRule rule;
-        rule.pattern = QRegularExpression(pattern);
+        rule.pattern = QRegularExpression(QString("(?:%1)").arg(controlFlowKeywords.join('|')));
         rule.format = controlFlowFormat;
         highlightingRules.append(rule);
     }
@@ -2868,11 +4891,14 @@ void CppHighlighter::rebuildHighlightingRules()
     highlightingRules.append(elseIfRule);
 }
 
-void CppHighlighter::setDarkTheme(bool dark)
+void CppHighlighter::setDarkTheme(bool dark, bool rehighlightDocument)
 {
     isDarkTheme = dark;
     setupColors();
-    rehighlight();
+    if (rehighlightDocument)
+    {
+        rehighlight();
+    }
 }
 
 void CppHighlighter::setupColors()
@@ -2922,6 +4948,57 @@ void CppHighlighter::setupColors()
     rebuildHighlightingRules();
 }
 
+class StablePlainTextDocumentLayout : public QPlainTextDocumentLayout
+{
+public:
+    explicit StablePlainTextDocumentLayout(QTextDocument *document)
+        : QPlainTextDocumentLayout(document)
+    {
+    }
+
+    QSizeF documentSize() const override
+    {
+        QSizeF size = QPlainTextDocumentLayout::documentSize();
+        if (m_stableWidthEnabled)
+        {
+            size.setWidth(m_stableWidth);
+        }
+        return size;
+    }
+
+    void setStableWidth(qreal width)
+    {
+        const qreal boundedWidth = qMax<qreal>(0.0, width);
+        if (m_stableWidthEnabled &&
+            qFuzzyCompare(m_stableWidth + 1.0, boundedWidth + 1.0))
+        {
+            return;
+        }
+
+        m_stableWidth = boundedWidth;
+        m_stableWidthEnabled = true;
+        emit documentSizeChanged(documentSize());
+        requestUpdate();
+    }
+
+    void clearStableWidth()
+    {
+        if (!m_stableWidthEnabled)
+        {
+            return;
+        }
+
+        m_stableWidthEnabled = false;
+        m_stableWidth = 0.0;
+        emit documentSizeChanged(QPlainTextDocumentLayout::documentSize());
+        requestUpdate();
+    }
+
+private:
+    bool m_stableWidthEnabled = false;
+    qreal m_stableWidth = 0.0;
+};
+
 class CodeCompleter;
 
 // 代码编辑器
@@ -2939,6 +5016,8 @@ public:
     void setAutoQuotesEnabled(bool enabled);
     void setAutoIndentEnabled(bool enabled);
     void setIndentSize(int size);
+    void setCompletionAcceptMode(CompletionAcceptMode mode);
+    void setIndentationMode(IndentationMode mode);
     void setCodeFoldingEnabled(bool enabled);
     void setLineNumbersEnabled(bool enabled);
     void setDarkThemeEnabled(bool enabled);
@@ -2993,7 +5072,8 @@ public:
     void enableAllCompletion()
     {
         completionEnabled = true;
-        competitionMode = false;
+
+competitionMode = false;
     }
 
     void hideCompletion();
@@ -3070,9 +5150,19 @@ warningLine = -1;
         viewport()->update();
     }
     void setThemeMode(ThemeMode mode);
+    bool isLargeFileLoading() const;
+    void beginLargeFileLoad();
+    void appendLargeFileChunk(const QString &text);
+    void endLargeFileLoad();
 
 private:
+    void startLargeFileWidthScan();
+    qreal laidOutBlockWidth(const QTextBlock &block) const;
+    void scheduleLargeThemeRehighlight(CppHighlighter *highlighter);
     void updateFontDependentLayout();
+    QString indentationTextForColumns(int columns) const;
+    QString indentationUnit() const;
+    bool acceptsCompletionWithKey(const QKeyEvent *event) const;
     int leadingIndentColumns(const QTextBlock &block) const;
     qreal blockTextPositionX(const QTextBlock &block, int characterOffset) const;
     qreal indentGuideX(const QTextBlock &block, int visualColumn) const;
@@ -3081,6 +5171,8 @@ private:
     QWidget *completionPopup = nullptr;
     QString completionPrefix;
     bool completionEnabled;
+    CompletionAcceptMode completionAcceptMode;
+    IndentationMode indentationMode;
     bool ignoreNextKeyPress;
 
     class MiniMapScrollBar : public QWidget
@@ -3320,6 +5412,20 @@ private:
     QString diagnosticHoverVisibleKey;
     DiagnosticInfo::Severity diagnosticHoverSeverity = DiagnosticInfo::Hint;
     QByteArray diagnosticTrackedTextHash;
+    bool m_largeDocumentMode = false;
+    bool m_largeFileLoading = false;
+    bool m_textContentChangePending = false;
+    bool m_largeTextChangePending = false;
+    bool m_largeThemeRehighlighting = false;
+    bool m_largeThemeRefreshPending = false;
+    qreal m_largeWidthScanMaximum = 0.0;
+    QTextBlock m_largeWidthScanBlock;
+    QTimer *m_largeFileWidthTimer = nullptr;
+    QTimer *m_largeWidthRescanTimer = nullptr;
+    QTimer *m_largeThemeTimer = nullptr;
+    QPointer<CppHighlighter> m_largeThemeHighlighter;
+    QTextBlock m_largeThemeBlock;
+    StablePlainTextDocumentLayout *m_stableDocumentLayout = nullptr;
 
     void ensureDiagnosticHoverPopup();
     void hideDiagnosticHoverPopup();
@@ -3379,17 +5485,23 @@ protected:
 
 signals:
     void cursorPositionChanged();
-
+    void plainTextChanged();
     void fontSizeChanged(int newSize);
     void breakpointToggled(int line, bool added);
 };
 
 CodeEditor::CodeEditor(QWidget *parent)
     : QPlainTextEdit(parent), completer(nullptr), completionEnabled(true),
+      completionAcceptMode(CompletionAcceptMode::Tab), indentationMode(IndentationMode::Spaces),
       autoBrackets(true), autoQuotes(true), autoIndent(true), indentSize(4),
       lineNumbers(true), darkTheme(true), ignoreNextKeyPress(false),
       competitionMode(false), currentDebugLine(-1), codeBeautify(true)
 {
+    QTextDocument *stableDocument = new QTextDocument(this);
+    m_stableDocumentLayout = new StablePlainTextDocumentLayout(stableDocument);
+    stableDocument->setDocumentLayout(m_stableDocumentLayout);
+    setDocument(stableDocument);
+
     lineNumberArea = new LineNumberArea(this);
 
     setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -3442,21 +5554,66 @@ CodeEditor::CodeEditor(QWidget *parent)
                                     QCryptographicHash::Sha1)
                                     .toHex();
 
-    connect(document(), &QTextDocument::contentsChanged, this, [this]()
+    connect(document(), &QTextDocument::contentsChange, this,
+            [this](int, int charsRemoved, int charsAdded)
             {
-                const QByteArray currentTextHash = QCryptographicHash::hash(
-                                                       toPlainText().toUtf8(),
-                                                       QCryptographicHash::Sha1)
-                                                       .toHex();
-
-                // QTextDocument::contentsChanged() also fires for formatting changes.
-                // Theme/font changes therefore MUST NOT invalidate diagnostics. Only a
-                // real plain-text change is allowed to clear them.
-                if (currentTextHash == diagnosticTrackedTextHash)
+                if (charsRemoved <= 0 && charsAdded <= 0)
                 {
                     return;
                 }
-                diagnosticTrackedTextHash = currentTextHash;
+
+                if (m_largeFileLoading)
+                {
+                    return;
+                }
+
+                m_textContentChangePending = true;
+
+                if (!m_largeDocumentMode)
+                {
+                    return;
+                }
+
+                m_largeTextChangePending = true;
+
+                if (!m_largeWidthRescanTimer)
+                {
+                    m_largeWidthRescanTimer = new QTimer(this);
+                    m_largeWidthRescanTimer->setSingleShot(true);
+                    m_largeWidthRescanTimer->setInterval(160);
+                    connect(m_largeWidthRescanTimer, &QTimer::timeout, this, [this]()
+                            {
+                                startLargeFileWidthScan();
+                            });
+                }
+
+                m_largeWidthRescanTimer->start();
+            });
+
+    connect(document(), &QTextDocument::contentsChanged, this, [this]()
+            {
+                if (m_largeFileLoading)
+                {
+                    return;
+                }
+
+                if (m_largeDocumentMode)
+                {
+                    if (!m_largeTextChangePending)
+                    {
+                        return;
+                    }
+                    m_largeTextChangePending = false;
+                    m_textContentChangePending = false;
+                }
+                else
+                {
+                    if (!m_textContentChangePending)
+                    {
+                        return;
+                    }
+                    m_textContentChangePending = false;
+                }
 
                 int currentLine = textCursor().blockNumber() + 1;
                 bool needUpdate = false;
@@ -3503,6 +5660,8 @@ CodeEditor::CodeEditor(QWidget *parent)
                 {
                     updateExtraSelections();
                 }
+
+                emit plainTextChanged();
             });
 
     updateLineNumberAreaWidth(0);
@@ -3613,19 +5772,99 @@ CodeEditor::CodeEditor(QWidget *parent)
                     return;
                 }
 
+                if (selected.size() > 256)
+                {
+                    m_matchLines.clear();
+                    updateMiniMapScrollBar();
+                    return;
+                }
+
                 QSet<int> newMatches;
                 QString pattern = QRegularExpression::escape(selected);
                 QRegularExpression regex(pattern, QRegularExpression::CaseInsensitiveOption);
-                QTextCursor cursor(document());
-                while (!cursor.isNull() && !cursor.atEnd())
+                QTextCursor selectionCursor = textCursor();
+
+                if (m_largeDocumentMode || document()->characterCount() > 512 * 1024)
                 {
-                    cursor = document()->find(regex, cursor);
-                    if (!cursor.isNull())
+                    QTextBlock selectedBlock = selectionCursor.block();
+                    QList<QTextBlock> searchBlocks;
+                    searchBlocks.append(selectedBlock);
+
+                    QTextBlock previousBlock = selectedBlock;
+                    QTextBlock nextBlock = selectedBlock;
+                    for (int i = 0; i < 100; ++i)
                     {
-                        int line = cursor.blockNumber() + 1;
-                        newMatches.insert(line);
+                        if (previousBlock.isValid())
+                        {
+                            previousBlock = previousBlock.previous();
+                            if (previousBlock.isValid())
+                            {
+                                searchBlocks.append(previousBlock);
+                            }
+                        }
+
+                        if (nextBlock.isValid())
+                        {
+                            nextBlock = nextBlock.next();
+                            if (nextBlock.isValid())
+                            {
+                                searchBlocks.append(nextBlock);
+                            }
+                        }
+
+                        if (!previousBlock.isValid() && !nextBlock.isValid())
+                        {
+                            break;
+                        }
+                    }
+
+                    int scannedCharacters = 0;
+                    constexpr int maxMatchSearchCharacters = 2 * 1024 * 1024;
+                    for (const QTextBlock &block : searchBlocks)
+                    {
+                        if (newMatches.size() >= 500 ||
+                            scannedCharacters >= maxMatchSearchCharacters)
+                        {
+                            break;
+                        }
+
+                        if (block.length() > 100000 ||
+                            scannedCharacters + block.length() > maxMatchSearchCharacters)
+                        {
+                            continue;
+                        }
+
+                        const QString blockText = block.text();
+                        scannedCharacters += blockText.size();
+                        QRegularExpressionMatchIterator matches = regex.globalMatch(blockText);
+                        int matchCount = 0;
+                        while (matches.hasNext() && matchCount < 500)
+                        {
+                            matches.next();
+                            newMatches.insert(block.blockNumber() + 1);
+                            ++matchCount;
+                        }
+                        if (matchCount >= 500)
+                        {
+                            break;
+                        }
                     }
                 }
+                else
+                {
+                    QTextCursor cursor(document());
+                    int matchCount = 0;
+                    while (!cursor.isNull() && !cursor.atEnd() && matchCount < 500)
+                    {
+                        cursor = document()->find(regex, cursor);
+                        if (!cursor.isNull())
+                        {
+                            newMatches.insert(cursor.blockNumber() + 1);
+                            ++matchCount;
+                        }
+                    }
+                }
+
                 if (newMatches != m_matchLines)
                 {
                     m_matchLines = newMatches;
@@ -3636,6 +5875,318 @@ CodeEditor::CodeEditor(QWidget *parent)
             {
                 updateMiniMapScrollBar();
             });
+
+}
+
+bool CodeEditor::isLargeFileLoading() const
+{
+    return m_largeFileLoading;
+}
+
+void CodeEditor::beginLargeFileLoad()
+{
+    m_largeDocumentMode = true;
+    m_largeFileLoading = true;
+    m_largeTextChangePending = false;
+    m_largeWidthScanMaximum = 0.0;
+    m_largeWidthScanBlock = QTextBlock();
+
+    if (m_stableDocumentLayout)
+    {
+        const qreal initialWidth = viewport()
+                                       ? qMax<qreal>(0.0, viewport()->width())
+                                       : 0.0;
+        m_stableDocumentLayout->setStableWidth(initialWidth);
+    }
+
+    if (m_largeFileWidthTimer)
+    {
+        m_largeFileWidthTimer->stop();
+        m_largeFileWidthTimer->deleteLater();
+        m_largeFileWidthTimer = nullptr;
+    }
+
+    if (m_largeThemeTimer)
+    {
+        m_largeThemeTimer->stop();
+        m_largeThemeTimer->deleteLater();
+        m_largeThemeTimer = nullptr;
+    }
+
+    m_largeThemeHighlighter.clear();
+    m_largeThemeBlock = QTextBlock();
+    m_largeThemeRehighlighting = false;
+    m_largeThemeRefreshPending = false;
+
+    setReadOnly(true);
+    document()->setUndoRedoEnabled(false);
+    document()->setModified(false);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    if (horizontalScrollBar())
+    {
+        horizontalScrollBar()->setValue(0);
+    }
+}
+
+void CodeEditor::appendLargeFileChunk(const QString &text)
+{
+    if (!m_largeFileLoading || text.isEmpty())
+    {
+        return;
+    }
+
+    QTextCursor cursor(document());
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(text);
+}
+
+qreal CodeEditor::laidOutBlockWidth(const QTextBlock &block) const
+{
+    if (!block.isValid())
+    {
+        return 0.0;
+    }
+
+    QPlainTextDocumentLayout *plainLayout =
+        qobject_cast<QPlainTextDocumentLayout *>(document()->documentLayout());
+    if (!plainLayout)
+    {
+        return 0.0;
+    }
+
+    plainLayout->ensureBlockLayout(block);
+    QTextLayout *layout = block.layout();
+    if (!layout || layout->lineCount() < 1)
+    {
+        return 0.0;
+    }
+
+    const qreal margin = document()->documentMargin();
+    qreal width = 0.0;
+    for (int i = 0; i < layout->lineCount(); ++i)
+    {
+        width = qMax(width, layout->lineAt(i).naturalTextWidth() + 2.0 * margin);
+    }
+
+    return width;
+}
+
+void CodeEditor::startLargeFileWidthScan()
+{
+    if (!m_largeDocumentMode || !document())
+    {
+        return;
+    }
+
+    if (m_largeFileWidthTimer)
+    {
+        m_largeFileWidthTimer->stop();
+        m_largeFileWidthTimer->deleteLater();
+        m_largeFileWidthTimer = nullptr;
+    }
+
+    m_largeWidthScanBlock = document()->firstBlock();
+    m_largeWidthScanMaximum = qMax<qreal>(0.0, 2.0 * document()->documentMargin());
+    m_largeFileWidthTimer = new QTimer(this);
+    m_largeFileWidthTimer->setInterval(0);
+
+    connect(m_largeFileWidthTimer, &QTimer::timeout, this, [this]()
+            {
+                QElapsedTimer timeBudget;
+                timeBudget.start();
+                int processedBlocks = 0;
+
+                while (m_largeWidthScanBlock.isValid() &&
+                       processedBlocks < 512 &&
+                       timeBudget.elapsed() < 3)
+                {
+                    m_largeWidthScanMaximum =
+                        qMax(m_largeWidthScanMaximum, laidOutBlockWidth(m_largeWidthScanBlock));
+                    m_largeWidthScanBlock = m_largeWidthScanBlock.next();
+                    ++processedBlocks;
+                }
+
+                if (m_largeWidthScanBlock.isValid())
+                {
+                    return;
+                }
+
+                if (m_largeFileWidthTimer)
+                {
+                    m_largeFileWidthTimer->stop();
+                    m_largeFileWidthTimer->deleteLater();
+                    m_largeFileWidthTimer = nullptr;
+                }
+
+                if (m_stableDocumentLayout)
+                {
+                    m_stableDocumentLayout->setStableWidth(m_largeWidthScanMaximum);
+                }
+
+                const bool finishingInitialLoad = m_largeFileLoading;
+                if (finishingInitialLoad)
+                {
+                    m_largeFileLoading = false;
+                    m_largeTextChangePending = false;
+                    document()->setUndoRedoEnabled(true);
+                    document()->setModified(false);
+                    setReadOnly(false);
+                    setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+
+                    if (horizontalScrollBar())
+                    {
+                        horizontalScrollBar()->setValue(0);
+                    }
+
+                    if (verticalScrollBar())
+                    {
+                        verticalScrollBar()->setValue(0);
+                    }
+
+                    if (m_largeThemeRefreshPending)
+                    {
+                        m_largeThemeRefreshPending = false;
+                        const QList<CppHighlighter *> highlighters =
+                            document()->findChildren<CppHighlighter *>();
+                        for (CppHighlighter *highlighter : highlighters)
+                        {
+                            if (highlighter)
+                            {
+                                scheduleLargeThemeRehighlight(highlighter);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                updateLineNumberAreaWidth(blockCount());
+                highlightCurrentLine();
+                updateMiniMapScrollBar();
+
+                if (viewport())
+                {
+                    viewport()->update();
+                }
+            });
+
+    m_largeFileWidthTimer->start();
+}
+
+void CodeEditor::endLargeFileLoad()
+{
+    if (!m_largeFileLoading)
+    {
+        return;
+    }
+
+    m_largeTextChangePending = false;
+    document()->setModified(false);
+    startLargeFileWidthScan();
+}
+
+void CodeEditor::scheduleLargeThemeRehighlight(CppHighlighter *highlighter)
+{
+    if (!highlighter || !m_largeDocumentMode || m_largeFileLoading || !document())
+    {
+        return;
+    }
+
+    if (m_largeThemeTimer)
+    {
+        m_largeThemeTimer->stop();
+        m_largeThemeTimer->deleteLater();
+        m_largeThemeTimer = nullptr;
+    }
+
+    m_largeThemeHighlighter = highlighter;
+    m_largeThemeRehighlighting = true;
+
+    {
+        QSignalBlocker blocker(document());
+        QTextBlock visibleBlock = firstVisibleBlock();
+        int visibleBlocks = 0;
+        while (visibleBlock.isValid() && visibleBlocks < 256)
+        {
+            const QRectF geometry =
+                blockBoundingGeometry(visibleBlock).translated(contentOffset());
+            if (geometry.top() > viewport()->height())
+            {
+                break;
+            }
+
+            highlighter->rehighlightBlock(visibleBlock);
+            visibleBlock = visibleBlock.next();
+            ++visibleBlocks;
+        }
+    }
+
+    m_largeThemeBlock = document()->firstBlock();
+    m_largeThemeTimer = new QTimer(this);
+    m_largeThemeTimer->setInterval(0);
+
+    connect(m_largeThemeTimer, &QTimer::timeout, this, [this]()
+            {
+                if (!m_largeThemeHighlighter)
+                {
+                    if (m_largeThemeTimer)
+                    {
+                        m_largeThemeTimer->stop();
+                        m_largeThemeTimer->deleteLater();
+                        m_largeThemeTimer = nullptr;
+                    }
+                    m_largeThemeRehighlighting = false;
+                    return;
+                }
+
+                QElapsedTimer timeBudget;
+                timeBudget.start();
+                int processedBlocks = 0;
+
+                {
+                    QSignalBlocker blocker(document());
+                    while (m_largeThemeBlock.isValid() &&
+                           processedBlocks < 128 &&
+                           timeBudget.elapsed() < 2)
+                    {
+                        m_largeThemeHighlighter->rehighlightBlock(m_largeThemeBlock);
+                        m_largeThemeBlock = m_largeThemeBlock.next();
+                        ++processedBlocks;
+                    }
+                }
+
+                if (m_largeThemeBlock.isValid())
+                {
+                    if (viewport())
+                    {
+                        viewport()->update();
+                    }
+                    return;
+                }
+
+                if (m_largeThemeTimer)
+                {
+                    m_largeThemeTimer->stop();
+                    m_largeThemeTimer->deleteLater();
+                    m_largeThemeTimer = nullptr;
+                }
+
+                m_largeThemeHighlighter.clear();
+                m_largeThemeRehighlighting = false;
+                updateMatchHighlights();
+                updateExtraSelections();
+
+                if (viewport())
+                {
+                    viewport()->update();
+                }
+
+                if (lineNumberArea)
+                {
+                    lineNumberArea->update();
+                }
+            });
+
+    m_largeThemeTimer->start();
 }
 
 CodeEditor::MiniMapScrollBar::MiniMapScrollBar(CodeEditor *editor)
@@ -3910,7 +6461,8 @@ void CodeEditor::MiniMapScrollBar::paintEvent(QPaintEvent *event)
         y1 = qBound(
             0.0,
             y1,
-            (double)viewHeight);
+
+(double)viewHeight);
 
         y2 = qBound(
             0.0,
@@ -4213,10 +6765,15 @@ void CodeEditor::updateCompletionListStyle()
 
 void CodeEditor::updateMatchHighlights()
 {
+    if (m_largeFileLoading || m_largeThemeRehighlighting)
+    {
+        return;
+    }
+
     QString selected = textCursor().selectedText();
     selected.replace(QChar::ParagraphSeparator, QChar::Space);
     selected = selected.trimmed();
-    if (selected.isEmpty())
+    if (selected.isEmpty() || selected.size() > 256)
     {
         matchSelections.clear();
         updateExtraSelections();
@@ -4225,18 +6782,97 @@ void CodeEditor::updateMatchHighlights()
 
     QString pattern = QRegularExpression::escape(selected);
     QRegularExpression regex(pattern, QRegularExpression::CaseInsensitiveOption);
-
-    QTextCursor cursor(document());
     QList<QTextEdit::ExtraSelection> newSelections;
-    while (!cursor.isNull() && !cursor.atEnd())
+    constexpr int maxMatchHighlights = 500;
+
+    if (m_largeDocumentMode || document()->characterCount() > 512 * 1024)
     {
-        cursor = document()->find(regex, cursor);
-        if (!cursor.isNull())
+        QTextBlock selectedBlock = textCursor().block();
+        if (selectedBlock.isValid())
         {
-            QTextEdit::ExtraSelection sel;
-            sel.cursor = cursor;
-            sel.format.setBackground(QColor(200, 200, 200, 100));
-            newSelections.append(sel);
+            QList<QTextBlock> searchBlocks;
+            searchBlocks.append(selectedBlock);
+
+            QTextBlock previousBlock = selectedBlock;
+            QTextBlock nextBlock = selectedBlock;
+            for (int i = 0; i < 100; ++i)
+            {
+                if (previousBlock.isValid())
+                {
+                    previousBlock = previousBlock.previous();
+                    if (previousBlock.isValid())
+                    {
+                        searchBlocks.append(previousBlock);
+                    }
+                }
+
+                if (nextBlock.isValid())
+                {
+                    nextBlock = nextBlock.next();
+                    if (nextBlock.isValid())
+                    {
+                        searchBlocks.append(nextBlock);
+                    }
+                }
+
+                if (!previousBlock.isValid() && !nextBlock.isValid())
+                {
+                    break;
+                }
+            }
+
+            int scannedCharacters = 0;
+            constexpr int maxMatchSearchCharacters = 2 * 1024 * 1024;
+            for (const QTextBlock &block : searchBlocks)
+            {
+                if (newSelections.size() >= maxMatchHighlights ||
+                    scannedCharacters >= maxMatchSearchCharacters)
+                {
+                    break;
+                }
+
+                if (block.length() > 100000)
+                {
+                    continue;
+                }
+
+                if (scannedCharacters + block.length() > maxMatchSearchCharacters)
+                {
+                    break;
+                }
+
+                const QString blockText = block.text();
+                scannedCharacters += blockText.size();
+                QRegularExpressionMatchIterator matches = regex.globalMatch(blockText);
+                while (newSelections.size() < maxMatchHighlights && matches.hasNext())
+                {
+                    const QRegularExpressionMatch match = matches.next();
+                    QTextCursor matchCursor(document());
+                    matchCursor.setPosition(block.position() + match.capturedStart());
+                    matchCursor.setPosition(block.position() + match.capturedEnd(), QTextCursor::KeepAnchor);
+
+                    QTextEdit::ExtraSelection sel;
+                    sel.cursor = matchCursor;
+                    sel.format.setBackground(QColor(200, 200, 200, 100));
+                    newSelections.append(sel);
+                }
+            }
+        }
+    }
+    else
+    {
+        QTextCursor cursor(document());
+        while (newSelections.size() < maxMatchHighlights &&
+               !cursor.isNull() && !cursor.atEnd())
+        {
+            cursor = document()->find(regex, cursor);
+            if (!cursor.isNull())
+            {
+                QTextEdit::ExtraSelection sel;
+                sel.cursor = cursor;
+                sel.format.setBackground(QColor(200, 200, 200, 100));
+                newSelections.append(sel);
+            }
         }
     }
 
@@ -4263,6 +6899,63 @@ void CodeEditor::setIndentSize(int size)
 {
     indentSize = qMax(1, size);
     updateFontDependentLayout();
+}
+
+void CodeEditor::setCompletionAcceptMode(CompletionAcceptMode mode)
+{
+    completionAcceptMode = mode;
+}
+
+void CodeEditor::setIndentationMode(IndentationMode mode)
+{
+    indentationMode = mode;
+    updateFontDependentLayout();
+}
+
+QString CodeEditor::indentationTextForColumns(int columns) const
+{
+    const int safeColumns = qMax(0, columns);
+    const int safeIndentSize = qMax(1, indentSize);
+
+    if (indentationMode == IndentationMode::Tabs)
+    {
+        const int tabCount = safeColumns / safeIndentSize;
+        const int spaceCount = safeColumns % safeIndentSize;
+        return QString(tabCount, QLatin1Char('\t')) + QString(spaceCount, QLatin1Char(' '));
+    }
+
+    return QString(safeColumns, QLatin1Char(' '));
+}
+
+QString CodeEditor::indentationUnit() const
+{
+    if (indentationMode == IndentationMode::Tabs)
+    {
+        return QString(1, QLatin1Char('\t'));
+    }
+
+    return QString(qMax(1, indentSize), QLatin1Char(' '));
+}
+
+bool CodeEditor::acceptsCompletionWithKey(const QKeyEvent *event) const
+{
+    if (!event)
+    {
+        return false;
+    }
+
+    if (completionAcceptMode == CompletionAcceptMode::Tab)
+    {
+        return event->key() == Qt::Key_Tab && event->modifiers() == Qt::NoModifier;
+    }
+
+    if (completionAcceptMode == CompletionAcceptMode::Enter)
+    {
+        return (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) &&
+               event->modifiers() == Qt::NoModifier;
+    }
+
+    return event->key() == Qt::Key_Space && event->modifiers() == Qt::NoModifier;
 }
 
 void CodeEditor::setErrorLine(int blockNumber)
@@ -4638,7 +7331,7 @@ QString CodeEditor::beautifyCode(const QString &code, bool isControlStructure)
         prevResult = result;
         result.replace(QRegularExpression("([a-zA-Z0-9_\$\$])&([a-zA-Z0-9_(])"), "\\1 & \\2");
         result.replace(QRegularExpression("([a-zA-Z0-9_\$\$])\\|([a-zA-Z0-9_(])"), "\\1 | \\2");
-        result.replace(QRegularExpression("([a-zA-Z0-9_\$\$])\\^([a-zA-Z0-9_(])"), "\\1 ^ \\2");
+        result.replace(QRegularExpression(R"(([a-zA-Z0-9_)\]\}])\s*\^\s*([a-zA-Z0-9_(\[]))"), "\\1 ^ \\2");
     } while (result != prevResult && ++loopCount < 10);
 
     result.replace(QRegularExpression("\\s*\\+\\s*"), "+");
@@ -4839,7 +7532,7 @@ bool CodeEditor::eventFilter(QObject *obj, QEvent *event)
         {
             QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
 
-            if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter)
+            if (acceptsCompletionWithKey(keyEvent))
             {
                 QModelIndex index = completionList->currentIndex();
                 if (index.isValid())
@@ -4858,14 +7551,14 @@ bool CodeEditor::eventFilter(QObject *obj, QEvent *event)
             {
                 return false;
             }
-            else if (keyEvent->key() == Qt::Key_Tab)
+            else if (keyEvent->key() == Qt::Key_Tab ||
+                     keyEvent->key() == Qt::Key_Return ||
+                     keyEvent->key() == Qt::Key_Enter ||
+                     keyEvent->key() == Qt::Key_Space)
             {
-                QModelIndex index = completionList->currentIndex();
-                if (index.isValid())
-                {
-                    insertCompletion(index.data().toString());
-                }
-                return true;
+                hideCompletion();
+                this->setFocus(Qt::OtherFocusReason);
+                return false;
             }
             else
             {
@@ -4905,7 +7598,7 @@ void CodeEditor::setThemeMode(ThemeMode mode)
 
     const bool eyeCare = mode == ThemeMode::EyeCare;
 
-    const QColor baseColor =
+const QColor baseColor =
         darkTheme ? QColor("#1E1E1E")
                   : eyeCare ? QColor("#FDF6E3")
                             : QColor("#FFFFFF");
@@ -4961,18 +7654,28 @@ void CodeEditor::setThemeMode(ThemeMode mode)
         viewport()->setAutoFillBackground(true);
     }
 
-    setStyleSheet(
-        QString(
-            "QPlainTextEdit {"
-            "    background-color: %1;"
-            "    color: %2;"
-            "    selection-background-color: %3;"
-            "    selection-color: %4;"
-            "}")
-            .arg(baseColor.name(),
-                 textColor.name(),
-                 selectionColor.name(),
-                 selectedTextColor.name()));
+    if (m_largeDocumentMode)
+    {
+        if (!styleSheet().isEmpty())
+        {
+            setStyleSheet(QString());
+        }
+    }
+    else
+    {
+        setStyleSheet(
+            QString(
+                "QPlainTextEdit {"
+                "    background-color: %1;"
+                "    color: %2;"
+                "    selection-background-color: %3;"
+                "    selection-color: %4;"
+                "}")
+                .arg(baseColor.name(),
+                     textColor.name(),
+                     selectionColor.name(),
+                     selectedTextColor.name()));
+    }
 
     updateCompletionListStyle();
 
@@ -4992,11 +7695,34 @@ void CodeEditor::setThemeMode(ThemeMode mode)
     const QList<CppHighlighter *> highlighters =
         document()->findChildren<CppHighlighter *>();
 
+    CppHighlighter *largeDocumentHighlighter = nullptr;
     for (CppHighlighter *highlighter : highlighters)
     {
-        if (highlighter)
+        if (!highlighter)
+        {
+            continue;
+        }
+
+        if (m_largeDocumentMode)
+        {
+            highlighter->setDarkTheme(darkTheme, false);
+            largeDocumentHighlighter = highlighter;
+        }
+        else
         {
             highlighter->setDarkTheme(darkTheme);
+        }
+    }
+
+    if (largeDocumentHighlighter)
+    {
+        if (m_largeFileLoading)
+        {
+            m_largeThemeRefreshPending = true;
+        }
+        else
+        {
+            scheduleLargeThemeRehighlight(largeDocumentHighlighter);
         }
     }
 
@@ -5010,8 +7736,11 @@ void CodeEditor::setThemeMode(ThemeMode mode)
         m_miniMap->update();
     }
 
-    style()->unpolish(this);
-    style()->polish(this);
+    if (!m_largeDocumentMode)
+    {
+        style()->unpolish(this);
+        style()->polish(this);
+    }
     viewport()->update();
     update();
 }
@@ -5186,6 +7915,7 @@ void CodeEditor::updateLineNumberAreaWidth(int)
 {
     const int miniMapWidth = 18;
     setViewportMargins(lineNumberAreaWidth(), 0, miniMapWidth, 0);
+
 }
 
 void CodeEditor::updateLineNumberArea(const QRect &rect, int dy)
@@ -5906,7 +8636,7 @@ void CodeEditor::rebuildBuildDiagnosticSelections()
 
         endColumn = qBound(startColumn + 1, endColumn, blockText.size());
 
-        QTextCursor cursor(document());
+QTextCursor cursor(document());
         cursor.setPosition(block.position() + startColumn);
         cursor.setPosition(block.position() + endColumn, QTextCursor::KeepAnchor);
 
@@ -6020,6 +8750,7 @@ void CodeEditor::resizeEvent(QResizeEvent *event)
         m_miniMap->setGeometry(x, y, barWidth, h);
         m_miniMap->raise();
     }
+
 }
 
 bool CodeEditor::isPositionInCommentOrString() const
@@ -6128,6 +8859,11 @@ void CodeEditor::updateFontDependentLayout()
         if (lineNumberArea)
         {
             lineNumberArea->update();
+        }
+
+        if (m_largeDocumentMode && !m_largeFileLoading)
+        {
+            startLargeFileWidthScan();
         }
     });
 }
@@ -6665,7 +9401,7 @@ void CodeEditor::handleAutoBrackets(QKeyEvent *event)
                 testCursor.movePosition(QTextCursor::StartOfBlock);
                 testCursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
 
-                QString newLine(targetIndent, ' ');
+                QString newLine = indentationTextForColumns(targetIndent);
                 newLine.append('}');
                 testCursor.insertText(newLine);
 
@@ -6765,13 +9501,14 @@ void CodeEditor::handleAutoIndent()
 
     for (int i = 0; i < previousText.length(); ++i)
     {
-        if (previousText[i] == ' ')
+        if (previousText[i] == QLatin1Char(' '))
         {
-            indentLevel++;
+            ++indentLevel;
         }
-        else if (previousText[i] == '	')
+        else if (previousText[i] == QLatin1Char('\t'))
         {
-            indentLevel += indentSize;
+            const int safeIndentSize = qMax(1, indentSize);
+            indentLevel = ((indentLevel / safeIndentSize) + 1) * safeIndentSize;
         }
         else
         {
@@ -6780,29 +9517,44 @@ void CodeEditor::handleAutoIndent()
     }
 
     QString currentLineText = currentBlock.text();
-
     bool hasClosingBrace = currentLineText.trimmed() == "}";
-
     QString trimmedPrevious = previousText.trimmed();
+
     if (trimmedPrevious.endsWith('{') && !hasClosingBrace)
     {
-        indentLevel += indentSize;
+        indentLevel += qMax(1, indentSize);
     }
 
     if (indentLevel > 0)
     {
-        QString indent(indentLevel, ' ');
-        cursor.insertText(indent);
+        cursor.insertText(indentationTextForColumns(indentLevel));
     }
 
     if (hasClosingBrace && trimmedPrevious.endsWith('}'))
     {
-        cursor.movePosition(QTextCursor::StartOfLine);
-        cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, indentSize);
-        QString selectedText = cursor.selectedText();
-        if (selectedText.trimmed().isEmpty() && selectedText.length() == indentSize)
+        QTextBlock block = cursor.block();
+        QString blockText = block.text();
+        int removeCount = 0;
+
+        if (!blockText.isEmpty() && blockText.at(0) == QLatin1Char('\t'))
         {
-            cursor.removeSelectedText();
+            removeCount = 1;
+        }
+        else
+        {
+            const int safeIndentSize = qMax(1, indentSize);
+            while (removeCount < qMin(safeIndentSize, blockText.size()) &&
+                   blockText.at(removeCount) == QLatin1Char(' '))
+            {
+                ++removeCount;
+            }
+        }
+
+        if (removeCount > 0)
+        {
+            QTextCursor editCursor(block);
+            editCursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, removeCount);
+            editCursor.removeSelectedText();
         }
     }
 }
@@ -6822,6 +9574,7 @@ public:
     {
         NormalCpp,
         EasyXProject,
+        MarkdownFile,
         Cancelled
     };
 
@@ -6856,9 +9609,15 @@ private:
     FileType selectedType;
     QWidget *normalCard;
     QWidget *easyxCard;
+    QWidget *markdownCard = nullptr;
     QWidget *selectedCard;
     QPushButton *createBtn;
     QPushButton *cancelBtn;
+    QLineEdit *searchEdit = nullptr;
+    QComboBox *languageCombo = nullptr;
+    QComboBox *platformCombo = nullptr;
+    QComboBox *fileTypeCombo = nullptr;
+    QListWidget *fileTypeList = nullptr;
     bool isDarkTheme;
     bool isEyeCareTheme;
 };
@@ -6866,19 +9625,30 @@ private:
 NewFileDialog::NewFileDialog(QWidget *parent)
     : QDialog(parent), selectedType(Cancelled), normalCard(nullptr), easyxCard(nullptr), selectedCard(nullptr), isDarkTheme(false), isEyeCareTheme(false)
 {
+    ThemeMode resolvedThemeMode = storedThemeMode();
+
     if (parent)
     {
-        QVariant themeVariant = parent->property("darkTheme");
-        if (themeVariant.isValid())
-        {
-            isDarkTheme = themeVariant.toBool();
-        }
         QVariant themeModeVariant = parent->property("themeMode");
         if (themeModeVariant.isValid())
         {
-            isEyeCareTheme = themeModeVariant.toInt() == static_cast<int>(ThemeMode::EyeCare);
+            int value = qBound(static_cast<int>(ThemeMode::Light),
+                               themeModeVariant.toInt(),
+                               static_cast<int>(ThemeMode::Dark));
+            resolvedThemeMode = static_cast<ThemeMode>(value);
+        }
+        else
+        {
+            QVariant themeVariant = parent->property("darkTheme");
+            if (themeVariant.isValid())
+            {
+                resolvedThemeMode = themeVariant.toBool() ? ThemeMode::Dark : ThemeMode::Light;
+            }
         }
     }
+
+    isDarkTheme = resolvedThemeMode == ThemeMode::Dark;
+    isEyeCareTheme = resolvedThemeMode == ThemeMode::EyeCare;
     setupUI();
 }
 
@@ -6905,7 +9675,8 @@ bool NewFileDialog::eventFilter(QObject *watched, QEvent *event)
             const bool leaving = event->type() == QEvent::Leave;
 
             if (hovering || leaving)
-            {
+
+{
                 blurAnimation->stop();
                 offsetAnimation->stop();
 
@@ -6927,312 +9698,599 @@ void NewFileDialog::showEvent(QShowEvent *event)
 {
     QDialog::showEvent(event);
 
-    QTimer::singleShot(0, this, [this]()
-                       {
-                           QWidget *anchorWindow = parentWidget() ? parentWidget()->window() : nullptr;
-                           QScreen *targetScreen = nullptr;
+    auto recenter = [this]()
+    {
+        centerDialogInAvailableGeometry(this, dialogTargetScreen(this), QSize(1040, 680));
+    };
 
-                           if (anchorWindow && anchorWindow->windowHandle())
-                           {
-                               targetScreen = anchorWindow->windowHandle()->screen();
-                           }
-
-                           if (!targetScreen && anchorWindow)
-                           {
-                               targetScreen = QGuiApplication::screenAt(anchorWindow->frameGeometry().center());
-                           }
-
-                           if (!targetScreen)
-                           {
-                               targetScreen = screen();
-                           }
-
-                           if (!targetScreen)
-                           {
-                               targetScreen = QGuiApplication::primaryScreen();
-                           }
-
-                           if (!targetScreen)
-                           {
-                               return;
-                           }
-
-                           const QRect available = targetScreen->availableGeometry();
-                           const QRect currentGeometry = geometry();
-                           const QRect currentFrameGeometry = frameGeometry();
-                           const int horizontalFrame = currentGeometry.left() - currentFrameGeometry.left() +
-                                                       currentFrameGeometry.right() - currentGeometry.right();
-                           const int verticalFrame = currentGeometry.top() - currentFrameGeometry.top() +
-                                                     currentFrameGeometry.bottom() - currentGeometry.bottom();
-                           const int maxClientWidth = qMax(1, available.width() - horizontalFrame);
-                           const int maxClientHeight = qMax(1, available.height() - verticalFrame);
-                           setFixedSize(qMin(720, maxClientWidth), qMin(500, maxClientHeight));
-
-                           QRect referenceRect = available;
-
-                           if (anchorWindow && anchorWindow->isVisible())
-                           {
-                               const QRect visibleAnchor = anchorWindow->frameGeometry().intersected(available);
-                               if (!visibleAnchor.isEmpty())
-                               {
-                                   referenceRect = visibleAnchor;
-                               }
-                           }
-
-                           QSize frameSize = frameGeometry().size();
-                           if (!frameSize.isValid() || frameSize.isEmpty())
-                           {
-                               frameSize = size();
-                           }
-
-                           QPoint frameTopLeft(referenceRect.center().x() - frameSize.width() / 2,
-                                               referenceRect.center().y() - frameSize.height() / 2);
-                           frameTopLeft.setX(qBound(available.left(),
-                                                    frameTopLeft.x(),
-                                                    qMax(available.left(), available.right() - frameSize.width() + 1)));
-                           frameTopLeft.setY(qBound(available.top(),
-                                                    frameTopLeft.y(),
-                                                    qMax(available.top(), available.bottom() - frameSize.height() + 1)));
-
-                           const QPoint frameOffset = geometry().topLeft() - frameGeometry().topLeft();
-                           move(frameTopLeft + frameOffset);
-                       });
+    QTimer::singleShot(0, this, recenter);
+    QTimer::singleShot(80, this, recenter);
 }
 
 void NewFileDialog::setupUI()
 {
+    const ThemeMode dialogThemeMode = isDarkTheme
+                                          ? ThemeMode::Dark
+                                          : isEyeCareTheme ? ThemeMode::EyeCare : ThemeMode::Light;
+    const NewFileThemeColors colors = newFileThemeColors(dialogThemeMode);
+
     setWindowTitle(tr("新建文件"));
-    resize(720, 500);
+    resize(1040, 680);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+    setStyleSheet(QString("QDialog { background: %1; }").arg(colors.pageBackground));
 
-    const QString pageBackground = isDarkTheme ? "#242A32" : isEyeCareTheme ? "#F6EED9" : "#F4F7FB";
-    const QString surfaceBackground = isDarkTheme ? "#2D3540" : isEyeCareTheme ? "#FFF9E8" : "#FFFFFF";
-    const QString footerBackground = isDarkTheme ? "#29313B" : isEyeCareTheme ? "#F2E7C9" : "#F8FAFD";
-    const QString borderColor = isDarkTheme ? "#46515E" : isEyeCareTheme ? "#C9BC91" : "#D8E0EA";
-    const QString titleColor = isDarkTheme ? "#F2F5F8" : isEyeCareTheme ? "#35362E" : "#243244";
-    const QString secondaryColor = isDarkTheme ? "#AEB8C4" : isEyeCareTheme ? "#6B6658" : "#6E7B8B";
-    const QString accentColor = isDarkTheme ? "#79A7FF" : isEyeCareTheme ? "#728B60" : "#4B78D1";
+    QVBoxLayout *pageLayout = new QVBoxLayout(this);
+    pageLayout->setContentsMargins(0, 0, 0, 0);
+    pageLayout->setSpacing(0);
 
-    setStyleSheet(QString("QDialog { background-color: %1; }").arg(pageBackground));
+    QWidget *bodyWidget = new QWidget(this);
+    bodyWidget->setStyleSheet(QString("background: %1;").arg(colors.pageBackground));
+    QVBoxLayout *bodyLayout = new QVBoxLayout(bodyWidget);
+    bodyLayout->setContentsMargins(30, 28, 30, 18);
+    bodyLayout->setSpacing(18);
 
-    QVBoxLayout *mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(0);
-    mainLayout->setContentsMargins(0, 0, 0, 0);
+    QHBoxLayout *titleRow = new QHBoxLayout;
+    titleRow->setSpacing(24);
 
-    QWidget *headerWidget = new QWidget(this);
-    headerWidget->setFixedHeight(92);
-    headerWidget->setStyleSheet(
-        QString(
-            "QWidget {"
-            "  background-color: %1;"
-            "  border-bottom: 1px solid %2;"
-            "}")
-            .arg(surfaceBackground, borderColor));
-
-    QVBoxLayout *headerLayout = new QVBoxLayout(headerWidget);
-    headerLayout->setContentsMargins(32, 18, 32, 16);
-    headerLayout->setSpacing(4);
-
-    QLabel *titleLabel = new QLabel(tr("新建文件"), headerWidget);
+    QLabel *titleLabel = new QLabel(tr("创建新文件"), bodyWidget);
     titleLabel->setStyleSheet(
         QString(
             "QLabel {"
-            "  font-size: 24px;"
-            "  font-weight: 700;"
-            "  color: %1;"
-            "  background: transparent;"
-            "  border: none;"
+            "    color: %1;"
+            "    font-size: 28px;"
+            "    font-weight: 600;"
+            "    background: transparent;"
             "}")
-            .arg(titleColor));
+            .arg(colors.titleColor));
 
-    QLabel *subtitleLabel = new QLabel(tr("选择要创建的文件类型"), headerWidget);
-    subtitleLabel->setStyleSheet(
+    searchEdit = new QLineEdit(bodyWidget);
+    searchEdit->setFixedHeight(42);
+    searchEdit->setMinimumWidth(360);
+    searchEdit->setMaximumWidth(520);
+    searchEdit->setPlaceholderText(tr("搜索文件类型 (Alt+S)"));
+    searchEdit->setClearButtonEnabled(true);
+    searchEdit->setStyleSheet(
+        QString(
+            "QLineEdit {"
+            "    background: %1;"
+            "    color: %2;"
+            "    border: 1px solid %3;"
+            "    border-radius: 3px;"
+            "    padding: 0 12px;"
+            "    font-size: 14px;"
+            "}"
+            "QLineEdit:focus {"
+            "    border: 1px solid %4;"
+            "}"
+            "QLineEdit::placeholder {"
+            "    color: %5;"
+            "}")
+            .arg(colors.inputBackground)
+            .arg(colors.titleColor)
+            .arg(colors.borderColor)
+            .arg(colors.accentColor)
+            .arg(colors.secondaryColor));
+
+    titleRow->addWidget(titleLabel);
+    titleRow->addStretch();
+    titleRow->addWidget(searchEdit, 1);
+    bodyLayout->addLayout(titleRow);
+
+    QHBoxLayout *contentRow = new QHBoxLayout;
+    contentRow->setSpacing(26);
+
+    QWidget *recentTypesPanel = new QWidget(bodyWidget);
+    recentTypesPanel->setFixedWidth(300);
+    recentTypesPanel->setStyleSheet("background: transparent;");
+    QVBoxLayout *recentTypesLayout = new QVBoxLayout(recentTypesPanel);
+    recentTypesLayout->setContentsMargins(0, 2, 0, 0);
+    recentTypesLayout->setSpacing(12);
+
+    QLabel *recentTypesTitle = new QLabel(tr("常用文件类型"), recentTypesPanel);
+    recentTypesTitle->setStyleSheet(
         QString(
             "QLabel {"
-            "  font-size: 13px;"
-            "  color: %1;"
-            "  background: transparent;"
-            "  border: none;"
+            "    color: %1;"
+            "    font-size: 20px;"
+            "    font-weight: 600;"
+            "    background: transparent;"
             "}")
-            .arg(secondaryColor));
+            .arg(colors.titleColor));
 
-    headerLayout->addWidget(titleLabel);
-    headerLayout->addWidget(subtitleLabel);
-    mainLayout->addWidget(headerWidget);
+    const QString quickButtonStyle = QString(
+                                         "QPushButton {"
+                                         "    text-align: left;"
+                                         "    padding: 0 18px;"
+                                         "    color: %1;"
+                                         "    background: %2;"
+                                         "    border: 1px solid %3;"
+                                         "    border-radius: 2px;"
+                                         "    font-size: 15px;"
+                                         "}"
+                                         "QPushButton:hover {"
+                                         "    background: %4;"
+                                         "    border-color: %5;"
+                                         "}")
+                                         .arg(colors.titleColor)
+                                         .arg(colors.surfaceBackground)
+                                         .arg(colors.borderColor)
+                                         .arg(colors.itemHoverBackground)
+                                         .arg(colors.hoverBorderColor);
 
-    QWidget *contentWidget = new QWidget(this);
-    contentWidget->setStyleSheet(QString("QWidget { background-color: %1; }").arg(pageBackground));
+    QList<QPair<QPushButton *, int>> recentTypeButtons;
+    recentTypesLayout->addWidget(recentTypesTitle);
 
-    QVBoxLayout *contentLayout = new QVBoxLayout(contentWidget);
-    contentLayout->setContentsMargins(32, 22, 32, 22);
-    contentLayout->setSpacing(14);
+    const QList<int> recentTypes = recentNewFileTypes();
+    if (recentTypes.isEmpty())
+    {
+        QLabel *emptyRecentLabel = new QLabel(tr("暂无最近使用的文件类型"), recentTypesPanel);
+        emptyRecentLabel->setWordWrap(true);
+        emptyRecentLabel->setStyleSheet(
+            QString(
+                "QLabel {"
+                "    color: %1;"
+                "    background: transparent;"
+                "    font-size: 13px;"
+                "    padding: 10px 2px;"
+                "}")
+                .arg(colors.secondaryColor));
+        recentTypesLayout->addWidget(emptyRecentLabel);
+    }
+    else
+    {
+        for (int i = 0; i < recentTypes.size() && i < 5; ++i)
+        {
+            const int type = recentTypes.at(i);
+            QPushButton *button = new QPushButton(newFileTypeDisplayName(type), recentTypesPanel);
+            button->setFixedHeight(62);
+            button->setCursor(Qt::PointingHandCursor);
+            button->setStyleSheet(quickButtonStyle);
+            button->setIcon(QIcon(newFileTypeIconPath(type, dialogThemeMode)));
+            button->setIconSize(QSize(28, 28));
+            recentTypesLayout->addWidget(button);
+            recentTypeButtons.append(qMakePair(button, type));
+        }
+    }
 
-    QLabel *hintLabel = new QLabel(tr("请选择一个项目类型："), contentWidget);
-    hintLabel->setStyleSheet(
+    recentTypesLayout->addStretch();
+
+    QWidget *browserPanel = new QWidget(bodyWidget);
+    browserPanel->setStyleSheet("background: transparent;");
+    QVBoxLayout *browserLayout = new QVBoxLayout(browserPanel);
+    browserLayout->setContentsMargins(0, 0, 0, 0);
+    browserLayout->setSpacing(14);
+
+    QHBoxLayout *filterRow = new QHBoxLayout;
+    filterRow->setSpacing(12);
+
+    languageCombo = new NewFileFilterComboBox(browserPanel);
+    languageCombo->addItem(tr("所有语言"));
+    languageCombo->addItem(tr("C++"));
+    languageCombo->addItem(tr("Markdown"));
+
+    platformCombo = new NewFileFilterComboBox(browserPanel);
+    platformCombo->addItem(tr("所有平台"));
+    platformCombo->addItem(tr("Windows"));
+    platformCombo->addItem(tr("跨平台"));
+
+    fileTypeCombo = new NewFileFilterComboBox(browserPanel);
+    fileTypeCombo->addItem(tr("所有文件类型"));
+    fileTypeCombo->addItem(tr("源代码"));
+    fileTypeCombo->addItem(tr("图形项目"));
+    fileTypeCombo->addItem(tr("文档"));
+
+    configureNewFileCombo(static_cast<NewFileFilterComboBox *>(languageCombo), colors);
+    configureNewFileCombo(static_cast<NewFileFilterComboBox *>(platformCombo), colors);
+    configureNewFileCombo(static_cast<NewFileFilterComboBox *>(fileTypeCombo), colors);
+
+    filterRow->addWidget(languageCombo, 1);
+    filterRow->addWidget(platformCombo, 1);
+    filterRow->addWidget(fileTypeCombo, 1);
+    browserLayout->addLayout(filterRow);
+
+    fileTypeList = new QListWidget(browserPanel);
+    fileTypeList->setSelectionMode(QAbstractItemView::SingleSelection);
+    fileTypeList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    fileTypeList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    fileTypeList->setSpacing(2);
+    fileTypeList->setStyleSheet(
         QString(
-            "QLabel {"
-            "  font-size: 14px;"
-            "  color: %1;"
-            "  font-weight: 600;"
-            "  background: transparent;"
+            "QListWidget {"
+            "    background: %1;"
+            "    border: none;"
+            "    outline: none;"
+            "}"
+            "QListWidget::item {"
+            "    background: %2;"
+            "    border: 1px solid transparent;"
+            "    margin: 3px 0;"
+            "}"
+            "QListWidget::item:hover {"
+            "    background: %3;"
+            "    border-color: %4;"
+            "}"
+            "QListWidget::item:selected {"
+            "    background: %5;"
+            "    border: 1px solid %6;"
             "}")
-            .arg(titleColor));
-    contentLayout->addWidget(hintLabel);
+            .arg(colors.pageBackground)
+            .arg(colors.itemBackground)
+            .arg(colors.itemHoverBackground)
+            .arg(colors.borderColor)
+            .arg(colors.itemSelectedBackground)
+            .arg(colors.accentColor));
 
-    QHBoxLayout *cardsLayout = new QHBoxLayout;
-    cardsLayout->setSpacing(16);
+    auto addFileTypeItem = [this, colors, dialogThemeMode](FileType type,
+                                                           const QString &title,
+                                                           const QString &description,
+                                                           const QString &language,
+                                                           const QString &platform,
+                                                           const QString &category,
+                                                           const QString &badgeText)
+    {
+        QListWidgetItem *item = new QListWidgetItem(fileTypeList);
+        item->setData(Qt::UserRole, static_cast<int>(type));
+        item->setData(Qt::UserRole + 1, title);
+        item->setData(Qt::UserRole + 2, description);
+        item->setData(Qt::UserRole + 3, language);
+        item->setData(Qt::UserRole + 4, platform);
+        item->setData(Qt::UserRole + 5, category);
+        item->setSizeHint(QSize(0, 98));
 
-    normalCard = createProjectCard(
-        tr("普通 C++ 文件"),
-        tr("创建标准的 C++ 源代码文件"),
-        QString(),
-        NormalCpp,
-        QColor(accentColor),
-        isDarkTheme);
-    cardsLayout->addWidget(normalCard);
+        QWidget *rowWidget = new QWidget(fileTypeList);
+        rowWidget->setAttribute(Qt::WA_TransparentForMouseEvents);
+        rowWidget->setStyleSheet("background: transparent;");
 
-    easyxCard = createProjectCard(
-        tr("EasyX 图形项目"),
-        tr("创建 EasyX 图形程序\n包含图形库头文件和初始化代码"),
-        QString(),
-        EasyXProject,
-        QColor(isDarkTheme ? "#D98A7E" : isEyeCareTheme ? "#A36D60" : "#C86559"),
-        isDarkTheme);
-    cardsLayout->addWidget(easyxCard);
+        QHBoxLayout *rowLayout = new QHBoxLayout(rowWidget);
+        rowLayout->setContentsMargins(18, 11, 18, 11);
+        rowLayout->setSpacing(16);
 
-    QButtonGroup *cardGroup = new QButtonGroup(this);
-    cardGroup->setExclusive(true);
-    cardGroup->addButton(qobject_cast<QPushButton *>(normalCard));
-    cardGroup->addButton(qobject_cast<QPushButton *>(easyxCard));
+        QLabel *iconLabel = new QLabel(rowWidget);
+        iconLabel->setFixedSize(52, 52);
+        iconLabel->setAlignment(Qt::AlignCenter);
+        iconLabel->setStyleSheet("background: transparent; border: none;");
+        const QIcon typeIcon(newFileTypeIconPath(static_cast<int>(type), dialogThemeMode));
 
-    contentLayout->addLayout(cardsLayout);
+        if (!typeIcon.isNull())
+        {
+            iconLabel->setPixmap(typeIcon.pixmap(QSize(40, 40)));
+        }
+        else
+        {
+            iconLabel->setText(badgeText);
+            iconLabel->setStyleSheet(
+                QString(
+                    "QLabel {"
+                    "    color: %1;"
+                    "    background: %2;"
+                    "    border: 1px solid %3;"
+                    "    border-radius: 4px;"
+                    "    font-size: 14px;"
+                    "    font-weight: 700;"
+                    "}")
+                    .arg(colors.titleColor)
+                    .arg(colors.surfaceBackground)
+                    .arg(colors.borderColor));
+        }
 
-    QWidget *infoWidget = new QWidget(contentWidget);
-    infoWidget->setStyleSheet(
-        QString(
-            "QWidget {"
-            "  background-color: %1;"
-            "  border: 1px solid %2;"
-            "  border-radius: 9px;"
-            "}")
-            .arg(surfaceBackground, borderColor));
+        QVBoxLayout *textLayout = new QVBoxLayout;
+        textLayout->setContentsMargins(0, 0, 0, 0);
+        textLayout->setSpacing(5);
 
-    QVBoxLayout *infoLayout = new QVBoxLayout(infoWidget);
-    infoLayout->setContentsMargins(16, 12, 16, 12);
-    infoLayout->setSpacing(5);
+        QLabel *titleText = new QLabel(title, rowWidget);
+        titleText->setStyleSheet(
+            QString(
+                "QLabel {"
+                "    color: %1;"
+                "    background: transparent;"
+                "    font-size: 16px;"
+                "    font-weight: 600;"
+                "}")
+                .arg(colors.titleColor));
 
-    QLabel *infoTitle = new QLabel(tr("提示"), infoWidget);
-    infoTitle->setStyleSheet(
-        QString(
-            "QLabel {"
-            "  font-size: 13px;"
-            "  font-weight: 700;"
-            "  color: %1;"
-            "  background: transparent;"
-            "  border: none;"
-            "}")
-            .arg(titleColor));
+        QLabel *descriptionText = new QLabel(description, rowWidget);
+        descriptionText->setStyleSheet(
+            QString(
+                "QLabel {"
+                "    color: %1;"
+                "    background: transparent;"
+                "    font-size: 12px;"
+                "}")
+                .arg(colors.secondaryColor));
 
-    QLabel *infoText = new QLabel(
-        tr("普通 C++ 文件：适合编写标准 C++ 程序\n"
-           "EasyX 项目：自动配置图形库环境，适合图形编程"),
-        infoWidget);
-    infoText->setStyleSheet(
-        QString(
-            "QLabel {"
-            "  font-size: 12px;"
-            "  color: %1;"
-            "  background: transparent;"
-            "  border: none;"
-            "}")
-            .arg(secondaryColor));
+        QHBoxLayout *tagLayout = new QHBoxLayout;
+        tagLayout->setContentsMargins(0, 0, 0, 0);
+        tagLayout->setSpacing(8);
 
-    infoLayout->addWidget(infoTitle);
-    infoLayout->addWidget(infoText);
-    contentLayout->addWidget(infoWidget);
-    contentLayout->addStretch();
+        const QString tagStyle = QString(
+                                     "QLabel {"
+                                     "    color: %1;"
+                                     "    background: %2;"
+                                     "    border-radius: 3px;"
+                                     "    padding: 3px 8px;"
+                                     "    font-size: 11px;"
+                                     "}")
+                                     .arg(colors.tagTextColor)
+                                     .arg(colors.tagBackground);
 
-    mainLayout->addWidget(contentWidget, 1);
+        QLabel *languageTag = new QLabel(language, rowWidget);
+        QLabel *platformTag = new QLabel(platform, rowWidget);
+        QLabel *categoryTag = new QLabel(category, rowWidget);
+        languageTag->setStyleSheet(tagStyle);
+        platformTag->setStyleSheet(tagStyle);
+        categoryTag->setStyleSheet(tagStyle);
+
+        tagLayout->addWidget(languageTag);
+        tagLayout->addWidget(platformTag);
+        tagLayout->addWidget(categoryTag);
+        tagLayout->addStretch();
+
+        textLayout->addWidget(titleText);
+        textLayout->addWidget(descriptionText);
+        textLayout->addLayout(tagLayout);
+
+        rowLayout->addWidget(iconLabel);
+        rowLayout->addLayout(textLayout, 1);
+
+        fileTypeList->setItemWidget(item, rowWidget);
+    };
+
+    addFileTypeItem(NormalCpp,
+                    tr("C++ 源文件"),
+                    tr("创建标准的 C++ 源代码文件"),
+                    tr("C++"),
+                    tr("跨平台"),
+                    tr("源代码"),
+                    tr("C++"));
+    addFileTypeItem(EasyXProject,
+                    tr("EasyX 图形项目"),
+                    tr("创建带 EasyX 图形库模板的 C++ 文件"),
+                    tr("C++"),
+                    tr("Windows"),
+                    tr("图形项目"),
+                    tr("EX"));
+    addFileTypeItem(MarkdownFile,
+                    tr("Markdown 文档"),
+                    tr("创建 Markdown 文档并使用实时预览"),
+                    tr("Markdown"),
+                    tr("跨平台"),
+                    tr("文档"),
+                    tr("MD"));
+
+    browserLayout->addWidget(fileTypeList, 1);
+
+    contentRow->addWidget(recentTypesPanel);
+    contentRow->addWidget(browserPanel, 1);
+    bodyLayout->addLayout(contentRow, 1);
 
     QWidget *footerWidget = new QWidget(this);
-    footerWidget->setFixedHeight(68);
+    footerWidget->setFixedHeight(76);
     footerWidget->setStyleSheet(
         QString(
             "QWidget {"
-            "  background-color: %1;"
-            "  border-top: 1px solid %2;"
+            "    background: %1;"
+            "    border-top: 1px solid %2;"
             "}")
-            .arg(footerBackground, borderColor));
+            .arg(colors.footerBackground)
+            .arg(colors.borderColor));
 
     QHBoxLayout *footerLayout = new QHBoxLayout(footerWidget);
-    footerLayout->setContentsMargins(32, 13, 32, 13);
-    footerLayout->setSpacing(10);
+    footerLayout->setContentsMargins(28, 14, 28, 14);
+    footerLayout->setSpacing(12);
     footerLayout->addStretch();
 
     cancelBtn = new QPushButton(tr("取消"), footerWidget);
-    cancelBtn->setFixedSize(112, 40);
+    cancelBtn->setFixedSize(154, 42);
     cancelBtn->setCursor(Qt::PointingHandCursor);
     cancelBtn->setStyleSheet(
         QString(
             "QPushButton {"
-            "  background-color: %1;"
-            "  color: %2;"
-            "  border: 1px solid %3;"
-            "  border-radius: 7px;"
-            "  font-size: 14px;"
-            "  font-weight: 600;"
+            "    color: %1;"
+            "    background: %2;"
+            "    border: 1px solid %3;"
+            "    border-radius: 5px;"
+            "    font-size: 14px;"
             "}"
             "QPushButton:hover {"
-            "  border-color: %4;"
+            "    background: %4;"
             "}"
             "QPushButton:pressed {"
-            "  background-color: %5;"
+            "    background: %5;"
             "}")
-            .arg(surfaceBackground,
-                 titleColor,
-                 borderColor,
-                 accentColor,
-                 footerBackground));
+            .arg(colors.titleColor)
+            .arg(colors.neutralButtonBackground)
+            .arg(colors.borderColor)
+            .arg(colors.neutralButtonHoverBackground)
+            .arg(colors.neutralButtonPressedBackground));
 
-    createBtn = new QPushButton(tr("创建文件"), footerWidget);
-    createBtn->setFixedSize(112, 40);
+    createBtn = new QPushButton(tr("确定"), footerWidget);
+    createBtn->setFixedSize(154, 42);
     createBtn->setCursor(Qt::PointingHandCursor);
     createBtn->setEnabled(false);
     createBtn->setStyleSheet(
         QString(
             "QPushButton {"
-            "  background-color: %1;"
-            "  color: white;"
-            "  border: 1px solid %1;"
-            "  border-radius: 7px;"
-            "  font-size: 14px;"
-            "  font-weight: 600;"
+            "    color: white;"
+            "    background: %1;"
+            "    border: 1px solid %1;"
+            "    border-radius: 5px;"
+            "    font-size: 14px;"
             "}"
             "QPushButton:hover {"
-            "  background-color: %2;"
-            "  border-color: %2;"
+            "    background: %2;"
             "}"
             "QPushButton:pressed {"
-            "  background-color: %3;"
-            "  border-color: %3;"
+            "    background: %3;"
             "}"
             "QPushButton:disabled {"
-            "  background-color: %4;"
-            "  border-color: %4;"
-            "  color: %5;"
+            "    color: %4;"
+            "    background: %5;"
+            "    border-color: %6;"
             "}")
-            .arg(accentColor,
-                 QColor(accentColor).lighter(108).name(),
-                 QColor(accentColor).darker(112).name(),
-                 isDarkTheme ? "#46515E" : isEyeCareTheme ? "#D6CBA8" : "#D8E0EA",
-                 isDarkTheme ? "#8E99A6" : isEyeCareTheme ? "#8A826E" : "#8A96A5"));
+            .arg(colors.accentColor)
+            .arg(colors.accentHoverColor)
+            .arg(colors.accentPressedColor)
+            .arg(colors.disabledTextColor)
+            .arg(colors.disabledBackground)
+            .arg(colors.borderColor));
 
     footerLayout->addWidget(cancelBtn);
     footerLayout->addWidget(createBtn);
-    mainLayout->addWidget(footerWidget);
 
+    pageLayout->addWidget(bodyWidget, 1);
+    pageLayout->addWidget(footerWidget);
+
+    auto applyFilters = [this]()
+    {
+        if (!searchEdit || !languageCombo || !platformCombo || !fileTypeCombo || !fileTypeList)
+        {
+            return;
+        }
+
+        const QString searchText = searchEdit->text().trimmed();
+        const QString languageFilter = languageCombo->currentText();
+        const QString platformFilter = platformCombo->currentText();
+        const QString categoryFilter = fileTypeCombo->currentText();
+
+        for (int i = 0; i < fileTypeList->count(); ++i)
+        {
+            QListWidgetItem *item = fileTypeList->item(i);
+
+            if (!item)
+            {
+                continue;
+            }
+
+            const QString title = item->data(Qt::UserRole + 1).toString();
+            const QString description = item->data(Qt::UserRole + 2).toString();
+            const QString language = item->data(Qt::UserRole + 3).toString();
+            const QString platform = item->data(Qt::UserRole + 4).toString();
+            const QString category = item->data(Qt::UserRole + 5).toString();
+
+            const bool searchMatches =
+                searchText.isEmpty() ||
+                title.contains(searchText, Qt::CaseInsensitive) ||
+                description.contains(searchText, Qt::CaseInsensitive) ||
+                language.contains(searchText, Qt::CaseInsensitive) ||
+                platform.contains(searchText, Qt::CaseInsensitive) ||
+                category.contains(searchText, Qt::CaseInsensitive);
+            const bool languageMatches =
+                languageFilter == tr("所有语言") || language == languageFilter;
+            const bool platformMatches =
+                platformFilter == tr("所有平台") || platform == platformFilter;
+            const bool categoryMatches =
+                categoryFilter == tr("所有文件类型") || category == categoryFilter;
+
+            item->setHidden(!(searchMatches && languageMatches && platformMatches && categoryMatches));
+        }
+
+        QListWidgetItem *currentItem = fileTypeList->currentItem();
+        if (currentItem && currentItem->isHidden())
+        {
+            fileTypeList->clearSelection();
+            fileTypeList->setCurrentItem(nullptr);
+        }
+
+        currentItem = fileTypeList->currentItem();
+        selectedType = currentItem && !currentItem->isHidden()
+                           ? static_cast<FileType>(currentItem->data(Qt::UserRole).toInt())
+                           : Cancelled;
+        createBtn->setEnabled(selectedType != Cancelled);
+    };
+
+    auto selectType = [this](FileType type)
+    {
+        if (!fileTypeList)
+        {
+            return;
+        }
+
+        if (languageCombo)
+        {
+            languageCombo->setCurrentIndex(0);
+        }
+
+        if (platformCombo)
+        {
+            platformCombo->setCurrentIndex(0);
+        }
+
+        if (fileTypeCombo)
+        {
+            fileTypeCombo->setCurrentIndex(0);
+        }
+
+        if (searchEdit)
+        {
+            searchEdit->clear();
+        }
+
+        for (int i = 0; i < fileTypeList->count(); ++i)
+        {
+            QListWidgetItem *item = fileTypeList->item(i);
+
+            if (item && item->data(Qt::UserRole).toInt() == static_cast<int>(type))
+            {
+                item->setHidden(false);
+                fileTypeList->setCurrentItem(item);
+                fileTypeList->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+                return;
+            }
+        }
+    };
+
+    connect(searchEdit, &QLineEdit::textChanged, this, [applyFilters](const QString &)
+            {
+                applyFilters();
+            });
+    connect(languageCombo, &QComboBox::currentTextChanged, this, [applyFilters](const QString &)
+            {
+                applyFilters();
+            });
+    connect(platformCombo, &QComboBox::currentTextChanged, this, [applyFilters](const QString &)
+            {
+                applyFilters();
+            });
+    connect(fileTypeCombo, &QComboBox::currentTextChanged, this, [applyFilters](const QString &)
+            {
+                applyFilters();
+            });
+    connect(fileTypeList, &QListWidget::itemSelectionChanged, this, [this]()
+            {
+                QListWidgetItem *item = fileTypeList ? fileTypeList->currentItem() : nullptr;
+                selectedType = item && !item->isHidden()
+                                   ? static_cast<FileType>(item->data(Qt::UserRole).toInt())
+                                   : Cancelled;
+                if (createBtn)
+                {
+                    createBtn->setEnabled(selectedType != Cancelled);
+                }
+            });
+    connect(fileTypeList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *)
+            {
+                onCreateClicked();
+            });
+    for (const QPair<QPushButton *, int> &entry : recentTypeButtons)
+    {
+        QPushButton *button = entry.first;
+        const FileType type = static_cast<FileType>(entry.second);
+        connect(button, &QPushButton::clicked, this, [selectType, type]()
+                {
+                    selectType(type);
+                });
+    }
     connect(cancelBtn, &QPushButton::clicked, this, &NewFileDialog::onCancelClicked);
     connect(createBtn, &QPushButton::clicked, this, &NewFileDialog::onCreateClicked);
+
+    QShortcut *searchShortcut = new QShortcut(QKeySequence("Alt+S"), this);
+    connect(searchShortcut, &QShortcut::activated, this, [this]()
+            {
+                if (searchEdit)
+                {
+                    searchEdit->setFocus();
+                    searchEdit->selectAll();
+                }
+            });
 }
 
 QWidget *NewFileDialog::createProjectCard(const QString &title, const QString &description,
@@ -7360,10 +10418,18 @@ QWidget *NewFileDialog::createProjectCard(const QString &title, const QString &d
 
 void NewFileDialog::updateCardSelection(QWidget *card)
 {
-    QPushButton *button = qobject_cast<QPushButton *>(card);
-    if (button)
+    const QList<QWidget *> cards = {
+        normalCard,
+        easyxCard,
+        markdownCard};
+
+    for (QWidget *candidate : cards)
     {
-        button->setChecked(true);
+        QPushButton *button = qobject_cast<QPushButton *>(candidate);
+        if (button)
+        {
+            button->setChecked(candidate == card);
+        }
     }
 }
 
@@ -7379,14 +10445,32 @@ void NewFileDialog::onCardClicked(FileType type)
     {
         selectedCard = easyxCard;
     }
+    else if (type == MarkdownFile)
+    {
+        selectedCard = markdownCard;
+    }
 
     updateCardSelection(selectedCard);
-    createBtn->setEnabled(true);
+
+    if (createBtn)
+    {
+        createBtn->setEnabled(selectedType != Cancelled);
+    }
 }
+
 void NewFileDialog::onCreateClicked()
 {
+    if (fileTypeList)
+    {
+        QListWidgetItem *item = fileTypeList->currentItem();
+        selectedType = item && !item->isHidden()
+                           ? static_cast<FileType>(item->data(Qt::UserRole).toInt())
+                           : Cancelled;
+    }
+
     if (selectedType != Cancelled)
     {
+        rememberRecentNewFileType(static_cast<int>(selectedType));
         accept();
     }
 }
@@ -8624,9 +11708,9 @@ void CodeCompleter::initializeKeywords()
 
             "unique_ptr", "shared_ptr", "weak_ptr",
 
-            "pair", "tuple", "function", "optional", "variant"
+            "pair", "tuple", "function", "optional", "variant",
 
-                                                     "fstream",
+            "fstream",
             "ifstream", "ofstream", "FILE",
 
             "include"};
@@ -8862,6 +11946,18 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
 {
     hideDiagnosticHoverPopup();
 
+    if (completionPopup && completionPopup->isVisible() && completionList &&
+        acceptsCompletionWithKey(event))
+    {
+        QModelIndex index = completionList->currentIndex();
+        if (index.isValid())
+        {
+            insertCompletion(index.data().toString());
+            event->accept();
+            return;
+        }
+    }
+
     if (event->key() == Qt::Key_BraceRight ||
         (!event->text().isEmpty() && event->text()[0] == '}'))
     {
@@ -8905,7 +12001,8 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
                         {
                             continue;
                         }
-                        if (blockText[j] == '}')
+
+if (blockText[j] == '}')
                         {
                             braceBalance++;
                         }
@@ -8959,18 +12056,19 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
 
                 cur.beginEditBlock();
                 QString textAfter = txt.mid(pos);
+                const QString indentText = indentationTextForColumns(newSpaces);
                 cur.movePosition(QTextCursor::StartOfBlock);
                 cur.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
-                cur.insertText(QString(newSpaces, ' ') + "}" + textAfter);
+                cur.insertText(indentText + "}" + textAfter);
 
                 if (textAfter.startsWith('}'))
                 {
-                    cur.setPosition(cur.block().position() + newSpaces + 1);
+                    cur.setPosition(cur.block().position() + indentText.size() + 1);
                     cur.deleteChar();
                 }
                 else
                 {
-                    cur.setPosition(cur.block().position() + newSpaces + 1);
+                    cur.setPosition(cur.block().position() + indentText.size() + 1);
                 }
                 cur.endEditBlock();
 
@@ -9008,8 +12106,8 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
                 }
             }
 
-            QString baseIndent = QString(currentIndent, ' ');
-            QString innerIndent = QString(currentIndent + indentSize, ' ');
+            QString baseIndent = indentationTextForColumns(currentIndent);
+            QString innerIndent = indentationTextForColumns(currentIndent + indentSize);
 
             cursor.beginEditBlock();
             cursor.insertText("\n" + innerIndent);
@@ -9064,15 +12162,8 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
             hideCompletion();
             break;
         case Qt::Key_Tab:
-        {
-            QModelIndex index = completionList->currentIndex();
-            if (index.isValid())
-            {
-                insertCompletion(index.data().toString());
-            }
-            event->accept();
-            return;
-        }
+            hideCompletion();
+            break;
         case Qt::Key_Escape:
             hideCompletion();
             event->accept();
@@ -9128,13 +12219,14 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
             cursor.beginEditBlock();
             if (!outdent)
             {
+                const QString unit = indentationUnit();
                 for (int blockNum = endBlock; blockNum >= startBlock; --blockNum)
                 {
                     QTextBlock block = document()->findBlockByNumber(blockNum);
                     if (block.isValid())
                     {
                         cursor.setPosition(block.position());
-                        cursor.insertText(QString(safeIndentSize, QLatin1Char(' ')));
+                        cursor.insertText(unit);
                     }
                 }
             }
@@ -9214,6 +12306,11 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
                 setTextCursor(cursor);
             }
         }
+        else if (indentationMode == IndentationMode::Tabs)
+        {
+            cursor.insertText(QString(1, QLatin1Char('\t')));
+            setTextCursor(cursor);
+        }
         else
         {
             const int column = cursor.positionInBlock();
@@ -9271,6 +12368,65 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
     }
 
     QChar key = event->text().isEmpty() ? QChar() : event->text().at(0);
+
+    if (event->key() == Qt::Key_Backspace &&
+        !textCursor().hasSelection() &&
+        indentationMode == IndentationMode::Tabs)
+    {
+        QTextCursor indentCursor = textCursor();
+        const int positionInBlock = indentCursor.positionInBlock();
+        if (positionInBlock > 0)
+        {
+            const QString beforeCursor = indentCursor.block().text().left(positionInBlock);
+            if (!beforeCursor.isEmpty() && beforeCursor.trimmed().isEmpty())
+            {
+                int removeCount = 0;
+                if (beforeCursor.endsWith(QLatin1Char('\t')))
+                {
+                    removeCount = 1;
+                }
+                else
+                {
+                    int trailingSpaces = 0;
+                    for (int i = beforeCursor.size() - 1; i >= 0 && beforeCursor.at(i) == QLatin1Char(' '); --i)
+                    {
+                        ++trailingSpaces;
+                    }
+
+                    int visualColumns = 0;
+                    const int safeIndentSize = qMax(1, indentSize);
+                    for (const QChar character : beforeCursor)
+                    {
+                        if (character == QLatin1Char('\t'))
+                        {
+                            visualColumns = ((visualColumns / safeIndentSize) + 1) * safeIndentSize;
+                        }
+                        else
+                        {
+                            ++visualColumns;
+                        }
+                    }
+
+                    int toPreviousStop = visualColumns % safeIndentSize;
+                    if (toPreviousStop == 0)
+                    {
+                        toPreviousStop = safeIndentSize;
+                    }
+                    removeCount = qMin(trailingSpaces, toPreviousStop);
+                }
+
+                if (removeCount > 0)
+                {
+                    indentCursor.movePosition(QTextCursor::Left, QTextCursor::KeepAnchor, removeCount);
+                    indentCursor.removeSelectedText();
+                    setTextCursor(indentCursor);
+                    hideCompletion();
+                    event->accept();
+                    return;
+                }
+            }
+        }
+    }
 
     if (event->key() == Qt::Key_Backspace && !textCursor().hasSelection())
     {
@@ -9510,8 +12666,8 @@ else if (lineText[i] == ')')
                 }
             }
 
-            QString baseIndent = QString(currentIndent, ' ');
-            QString innerIndent = QString(currentIndent + indentSize, ' ');
+            QString baseIndent = indentationTextForColumns(currentIndent);
+            QString innerIndent = indentationTextForColumns(currentIndent + indentSize);
 
             cursor.beginEditBlock();
             cursor.insertText("\n" + innerIndent);
@@ -9653,7 +12809,7 @@ else if (lineText[i] == ')')
                     currentSpaces++;
                 }
                 cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, currentSpaces);
-                cursor.insertText(QString(targetIndent, ' '));
+                cursor.insertText(indentationTextForColumns(targetIndent));
             }
         }
         else
@@ -9905,7 +13061,8 @@ class TerminalWebPage final : public QWebEnginePage
     Q_OBJECT
 
 public:
-    explicit TerminalWebPage(QWebEngineProfile *profile, QObject *parent = nullptr)
+
+explicit TerminalWebPage(QWebEngineProfile *profile, QObject *parent = nullptr)
         : QWebEnginePage(profile, parent)
     {
     }
@@ -10905,7 +14062,8 @@ body {
         });
 
         bridge.errorOccurred.connect(message => {
-            term.writeln('');
+
+term.writeln('');
             term.writeln('\x1b[31m' + message + '\x1b[0m');
         });
 
@@ -11905,7 +15063,8 @@ ProjectManager::ProjectManager(QWidget *parent)
     QHeaderView *header = treeView->header();
     header->setStretchLastSection(false);
     header->setSectionResizeMode(0, QHeaderView::Interactive);
-    header->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+
+header->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     header->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     header->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     header->setMinimumSectionSize(80);
@@ -12824,7 +15983,7 @@ void CompetitionModeDialog::setupUI()
 
     terminalCheck = new QCheckBox(tr("禁用终端"));
     snippetsCheck = new QCheckBox(tr("禁用代码片段"));
-    diagnosticsCheck = new QCheckBox(tr("禁用诊断工具"));
+    diagnosticsCheck = new QCheckBox(tr("禁用任务管理器"));
     projectManagerCheck = new QCheckBox(tr("禁用项目管理器"));
 
     terminalCheck->setChecked(false);
@@ -12882,6 +16041,308 @@ void CompetitionModeDialog::updateTimerPreview()
     }
 }
 
+class UpdateDownloadWorker : public QThread
+{
+    Q_OBJECT
+
+public:
+    UpdateDownloadWorker(const QUrl &url,
+                         int index,
+                         qint64 start,
+                         qint64 end,
+                         qint64 total,
+                         const QString &filePath,
+                         const QByteArray &validator,
+                         QObject *parent = nullptr)
+        : QThread(parent),
+          m_url(url),
+          m_index(index),
+          m_start(start),
+          m_end(end),
+          m_total(total),
+          m_filePath(filePath),
+          m_validator(validator)
+    {
+    }
+
+    bool succeeded() const
+    {
+        return m_succeeded;
+    }
+
+    QString errorString() const
+    {
+        return m_error;
+    }
+
+signals:
+    void chunkProgress(int index, qint64 received);
+
+protected:
+    void run() override
+    {
+        QFile file(m_filePath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        {
+            m_error = file.errorString();
+            return;
+        }
+
+        if (isInterruptionRequested())
+        {
+            return;
+        }
+
+        const qint64 expectedLength = m_end - m_start + 1;
+        QNetworkAccessManager manager;
+        qint64 lastReported = 0;
+        QString lastError;
+        constexpr int maxAttempts = 8;
+
+        for (int attempt = 0; attempt < maxAttempts && m_received < expectedLength; ++attempt)
+        {
+            if (isInterruptionRequested())
+            {
+                return;
+            }
+
+            const qint64 requestedStart = m_start + m_received;
+            QNetworkRequest request(m_url);
+            request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+            request.setAttribute(QNetworkRequest::Http2DirectAttribute, false);
+            request.setRawHeader("User-Agent", QString("CompilerIDE/%1").arg(IDE_VERSION).toUtf8());
+            request.setRawHeader("Accept-Encoding", "identity");
+            request.setRawHeader("Range", "bytes=" + QByteArray::number(requestedStart) + "-" + QByteArray::number(m_end));
+            if (!m_validator.isEmpty())
+            {
+                request.setRawHeader("If-Range", m_validator);
+            }
+            request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                                 QNetworkRequest::NoLessSafeRedirectPolicy);
+            request.setTransferTimeout(90000);
+
+            QNetworkReply *reply = manager.get(request);
+            QEventLoop loop;
+            QTimer interruptionTimer;
+            interruptionTimer.setInterval(100);
+            bool headersChecked = false;
+            bool validHeaders = false;
+            bool fatalError = false;
+            qint64 responseEnd = -1;
+            qint64 bytesInReply = 0;
+            QString attemptError;
+
+            auto checkHeaders = [&]()
+            {
+                if (headersChecked)
+                {
+                    return;
+                }
+
+                const QVariant status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+                if (!status.isValid())
+                {
+                    return;
+                }
+
+                const int statusCode = status.toInt();
+                if (statusCode < 200 || (statusCode >= 300 && statusCode < 400))
+                {
+                    return;
+                }
+
+                headersChecked = true;
+                const QRegularExpression expression(QStringLiteral("^bytes\\s+(\\d+)-(\\d+)/(\\d+)$"),
+                                                    QRegularExpression::CaseInsensitiveOption);
+                const QRegularExpressionMatch match = expression.match(QString::fromLatin1(reply->rawHeader("Content-Range").trimmed()));
+                bool startOk = false;
+                bool endOk = false;
+                bool totalOk = false;
+                const qint64 responseStart = match.captured(1).toLongLong(&startOk);
+                const qint64 end = match.captured(2).toLongLong(&endOk);
+                const qint64 responseTotal = match.captured(3).toLongLong(&totalOk);
+                const QByteArray encoding = reply->rawHeader("Content-Encoding").trimmed();
+                validHeaders = statusCode == 206 && match.hasMatch() &&
+                               startOk && endOk && totalOk &&
+                               responseStart == requestedStart && end >= requestedStart &&
+                               end <= m_end && responseTotal == m_total &&
+                               (encoding.isEmpty() || encoding.compare("identity", Qt::CaseInsensitive) == 0);
+                if (validHeaders)
+                {
+                    responseEnd = end;
+                }
+                else
+                {
+                    attemptError = QStringLiteral("Invalid HTTP range response");
+                    fatalError = statusCode != 408 && statusCode != 429 &&
+                                 (statusCode < 500 || statusCode >= 600);
+                }
+            };
+
+            auto receiveData = [&]()
+            {
+                checkHeaders();
+                if (!validHeaders)
+                {
+                    if (headersChecked)
+                    {
+                        reply->abort();
+                    }
+                    return;
+                }
+
+                while (reply->bytesAvailable() > 0)
+                {
+                    const QByteArray data = reply->read(qMin<qint64>(reply->bytesAvailable(), 256 * 1024));
+                    if (data.isEmpty())
+                    {
+                        break;
+                    }
+
+                    if (data.size() > responseEnd - requestedStart + 1 - bytesInReply ||
+                        data.size() > expectedLength - m_received)
+                    {
+                        attemptError = QStringLiteral("HTTP range response exceeds expected length");
+                        fatalError = true;
+                        reply->abort();
+                        return;
+                    }
+
+                    if (file.write(data) != data.size())
+                    {
+                        attemptError = file.errorString();
+                        fatalError = true;
+                        reply->abort();
+                        return;
+                    }
+
+                    bytesInReply += data.size();
+                    m_received += data.size();
+                    if (m_received - lastReported >= 256 * 1024)
+                    {
+                        lastReported = m_received;
+                        emit chunkProgress(m_index, m_received);
+                    }
+                }
+            };
+
+            connect(reply, &QNetworkReply::metaDataChanged, &loop, [&]()
+                    {
+                        checkHeaders();
+                        if (headersChecked && !validHeaders)
+                        {
+                            reply->abort();
+                        }
+                    });
+            connect(reply, &QIODevice::readyRead, &loop, receiveData);
+            connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+            connect(&interruptionTimer, &QTimer::timeout, &loop, [this, reply]()
+                    {
+                        if (isInterruptionRequested())
+                        {
+                            reply->abort();
+                        }
+                    });
+
+            interruptionTimer.start();
+            if (!reply->isFinished())
+            {
+                loop.exec();
+            }
+            interruptionTimer.stop();
+
+            if (!isInterruptionRequested())
+            {
+                receiveData();
+            }
+
+            const QNetworkReply::NetworkError networkError = reply->error();
+            const QString networkErrorText = reply->errorString();
+            delete reply;
+
+            if (isInterruptionRequested())
+            {
+                return;
+            }
+
+            if (m_received != lastReported)
+            {
+                lastReported = m_received;
+                emit chunkProgress(m_index, m_received);
+            }
+
+            if (fatalError)
+            {
+                m_error = attemptError.isEmpty() ? networkErrorText : attemptError;
+                return;
+            }
+
+            if (m_received == expectedLength && validHeaders)
+            {
+                break;
+            }
+
+            lastError = attemptError.isEmpty() ? networkErrorText : attemptError;
+            if (lastError.isEmpty() || networkError == QNetworkReply::NoError)
+            {
+                lastError = QStringLiteral("Incomplete HTTP range response");
+            }
+
+            if (attempt + 1 < maxAttempts)
+            {
+                const int retryDelayMs = qMin(3000, (attempt + 1) * 500);
+                for (int elapsed = 0; elapsed < retryDelayMs; elapsed += 100)
+                {
+                    if (isInterruptionRequested())
+                    {
+                        return;
+                    }
+                    QThread::msleep(100);
+                }
+            }
+        }
+
+        if (isInterruptionRequested())
+        {
+            return;
+        }
+
+        if (m_received != expectedLength)
+        {
+            m_error = lastError.isEmpty() ? QStringLiteral("Incomplete HTTP range response") : lastError;
+            return;
+        }
+
+        if (!file.flush())
+        {
+            m_error = file.errorString();
+            return;
+        }
+
+        file.close();
+        if (file.error() != QFileDevice::NoError)
+        {
+            m_error = file.errorString();
+            return;
+        }
+
+        m_succeeded = true;
+        emit chunkProgress(m_index, m_received);
+    }
+
+private:
+    QUrl m_url;
+    int m_index;
+    qint64 m_start;
+    qint64 m_end;
+    qint64 m_total;
+    QString m_filePath;
+    QByteArray m_validator;
+    qint64 m_received = 0;
+    bool m_succeeded = false;
+    QString m_error;
+};
+
 // 新增 SHA-256 安全校验
 class UpdateManager : public QObject
 {
@@ -12905,7 +16366,7 @@ public:
         return newVersion;
     }
 
-    void downloadAndUpdate();
+void downloadAndUpdate();
 
 signals:
     void updateCheckFinished(bool updateAvailable, const QString &newVersion);
@@ -12920,6 +16381,9 @@ private slots:
     void onDownloadProgress(qint64 bytesReceived, qint64 bytesTotal);
     void onDownloadFinished();
     void onSha256Fetched();
+    void onRangeProbeFinished();
+    void onChunkProgress(int index, qint64 received);
+    void onChunkFinished();
 
 private:
     void fetchUpdateInfo();
@@ -12929,12 +16393,25 @@ private:
     void fetchExpectedSha256();
     void verifyAndInstall(const QString &filePath);
     void fetchDownloadUrl();
+    void startSingleDownload();
+    void startParallelDownload(qint64 totalSize, const QByteArray &validator);
+    bool mergeDownloadedParts(QString &error);
+    void cleanupDownloadedParts();
 
     QNetworkAccessManager *networkManager;
     QNetworkReply *versionReply;
     QNetworkReply *urlReply;
     QNetworkReply *downloadReply;
     QNetworkReply *sha256Reply;
+    QNetworkReply *rangeProbeReply = nullptr;
+    QList<UpdateDownloadWorker *> downloadWorkers;
+    std::unique_ptr<QTemporaryDir> downloadPartsDirectory;
+    QVector<qint64> chunkBytesReceived = QVector<qint64>(4, 0);
+    qint64 parallelTotalSize = 0;
+    int activeChunkWorkers = 0;
+    bool parallelDownloadFailed = false;
+    QString parallelDownloadError;
+    bool downloadCanceled = false;
 
     bool updateAvailable;
     bool silentCheck;
@@ -12957,6 +16434,23 @@ UpdateManager::UpdateManager(QObject *parent)
 
 UpdateManager::~UpdateManager()
 {
+    downloadCanceled = true;
+    if (rangeProbeReply)
+    {
+        rangeProbeReply->abort();
+        rangeProbeReply->disconnect(this);
+    }
+    for (UpdateDownloadWorker *worker : downloadWorkers)
+    {
+        worker->requestInterruption();
+    }
+    for (UpdateDownloadWorker *worker : downloadWorkers)
+    {
+        worker->wait();
+        delete worker;
+    }
+    downloadWorkers.clear();
+    cleanupDownloadedParts();
     if (versionReply)
     {
         versionReply->abort();
@@ -13169,7 +16663,7 @@ void UpdateManager::showUpdateDialogWithInfo(const QString &updateInfo)
                            {
                                message += tr("更新详情：\n暂无详细更新信息");
                            }
-                           message += tr("\n\nIDE将在更新下载完成后立即更新。");
+                           message += tr("\n\n更新下载并校验完成后，将提示您确认安装。");
 
                            QMessageBox msgBox;
                            msgBox.setWindowTitle(tr("发现新版本 - Compiler IDE"));
@@ -13257,30 +16751,368 @@ void UpdateManager::startDownload()
         return;
     }
 
+    if (downloadReply || rangeProbeReply || !downloadWorkers.isEmpty())
+    {
+        return;
+    }
+
+    downloadCanceled = false;
     progressDialog = new QProgressDialog(tr("正在下载更新..."), tr("取消"), 0, 100, nullptr);
     progressDialog->setWindowTitle(tr("下载更新"));
     progressDialog->setWindowModality(Qt::WindowModal);
     progressDialog->setMinimumDuration(0);
     progressDialog->setValue(0);
     progressDialog->setAutoClose(false);
+    progressDialog->setAutoReset(false);
     connect(progressDialog, &QProgressDialog::canceled, this, [this]()
             {
+                downloadCanceled = true;
                 if (downloadReply)
                 {
                     downloadReply->abort();
                 }
+                if (rangeProbeReply)
+                {
+                    rangeProbeReply->abort();
+                }
+                for (UpdateDownloadWorker *worker : downloadWorkers)
+                {
+                    worker->requestInterruption();
+                }
                 progressDialog->close();
             });
-
-    QUrl downloadUrlObj(downloadUrl);
-    QNetworkRequest downloadRequest(downloadUrlObj);
-    downloadRequest.setRawHeader("User-Agent", QString("CompilerIDE/%1").arg(IDE_VERSION).toUtf8());
-    downloadRequest.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                                 QNetworkRequest::NoLessSafeRedirectPolicy);
 
     QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
     QString fileName = "CompilerIDE_Update_Setup.exe";
     downloadedFilePath = tempDir + "/" + fileName;
+
+    QNetworkRequest probeRequest{QUrl(downloadUrl)};
+    probeRequest.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    probeRequest.setAttribute(QNetworkRequest::Http2DirectAttribute, false);
+    probeRequest.setRawHeader("User-Agent", QString("CompilerIDE/%1").arg(IDE_VERSION).toUtf8());
+    probeRequest.setRawHeader("Accept-Encoding", "identity");
+    probeRequest.setRawHeader("Range", "bytes=0-0");
+    probeRequest.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                              QNetworkRequest::NoLessSafeRedirectPolicy);
+    probeRequest.setTransferTimeout(15000);
+
+    rangeProbeReply = networkManager->get(probeRequest);
+    connect(rangeProbeReply, &QNetworkReply::metaDataChanged, this, [this]()
+            {
+                if (rangeProbeReply)
+                {
+                    const QVariant status = rangeProbeReply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+                    if (status.isValid() && status.toInt() >= 200 &&
+                        (status.toInt() < 300 || status.toInt() >= 400) && status.toInt() != 206)
+                    {
+                        rangeProbeReply->abort();
+                    }
+                }
+            });
+    connect(rangeProbeReply, &QIODevice::readyRead, this, [this]()
+            {
+                if (rangeProbeReply && rangeProbeReply->bytesAvailable() > 1024)
+                {
+                    rangeProbeReply->abort();
+                }
+            });
+    connect(rangeProbeReply, &QNetworkReply::finished, this, &UpdateManager::onRangeProbeFinished);
+}
+
+void UpdateManager::onRangeProbeFinished()
+{
+    QNetworkReply *reply = rangeProbeReply;
+    if (!reply)
+    {
+        return;
+    }
+    rangeProbeReply = nullptr;
+
+    qint64 totalSize = 0;
+    QByteArray validator;
+    bool supportsRanges = false;
+    if (!downloadCanceled && reply->error() == QNetworkReply::NoError &&
+        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 206)
+    {
+        const QRegularExpression expression(QStringLiteral("^bytes\\s+0-0/(\\d+)$"),
+                                            QRegularExpression::CaseInsensitiveOption);
+        const QRegularExpressionMatch match = expression.match(QString::fromLatin1(reply->rawHeader("Content-Range").trimmed()));
+        bool sizeOk = false;
+        totalSize = match.captured(1).toLongLong(&sizeOk);
+        const QByteArray encoding = reply->rawHeader("Content-Encoding").trimmed();
+        supportsRanges = match.hasMatch() && sizeOk && totalSize >= 4 &&
+                         reply->readAll().size() == 1 &&
+                         (encoding.isEmpty() || encoding.compare("identity", Qt::CaseInsensitive) == 0);
+        if (supportsRanges)
+        {
+            validator = reply->rawHeader("ETag").trimmed();
+            if (validator.startsWith("W/"))
+            {
+                validator.clear();
+            }
+            if (validator.isEmpty())
+            {
+                validator = reply->rawHeader("Last-Modified").trimmed();
+            }
+        }
+    }
+    reply->deleteLater();
+
+    if (downloadCanceled)
+    {
+        if (progressDialog)
+        {
+            progressDialog->close();
+        }
+        emit downloadFinished(false);
+        return;
+    }
+
+    if (supportsRanges)
+    {
+        startParallelDownload(totalSize, validator);
+    }
+    else
+    {
+        startSingleDownload();
+    }
+}
+
+void UpdateManager::startParallelDownload(qint64 totalSize, const QByteArray &validator)
+{
+    downloadPartsDirectory = std::make_unique<QTemporaryDir>(
+        QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+            .filePath(QStringLiteral("CompilerIDE_Update_XXXXXX")));
+    if (!downloadPartsDirectory->isValid())
+    {
+        cleanupDownloadedParts();
+        startSingleDownload();
+        return;
+    }
+
+    parallelTotalSize = totalSize;
+    chunkBytesReceived.fill(0, 4);
+    parallelDownloadFailed = false;
+    parallelDownloadError.clear();
+    activeChunkWorkers = 4;
+    const qint64 baseChunkSize = totalSize / 4;
+
+    for (int index = 0; index < 4; ++index)
+    {
+        const qint64 start = baseChunkSize * index;
+        const qint64 end = index == 3 ? totalSize - 1 : start + baseChunkSize - 1;
+        const QString partFile = downloadPartsDirectory->filePath(QStringLiteral("part_%1").arg(index));
+        UpdateDownloadWorker *worker = new UpdateDownloadWorker(QUrl(downloadUrl), index,
+                                                                 start, end, totalSize,
+                                                                 partFile, validator, this);
+        downloadWorkers.append(worker);
+        connect(worker, &UpdateDownloadWorker::chunkProgress,
+                this, &UpdateManager::onChunkProgress);
+        connect(worker, &QThread::finished, this, &UpdateManager::onChunkFinished);
+    }
+
+    qDebug() << "开始下载更新文件:" << downloadUrl << "到:" << downloadedFilePath;
+    for (UpdateDownloadWorker *worker : downloadWorkers)
+    {
+        worker->start();
+    }
+}
+
+void UpdateManager::onChunkProgress(int index, qint64 received)
+{
+    if (downloadCanceled || index < 0 || index >= chunkBytesReceived.size())
+    {
+        return;
+    }
+
+    chunkBytesReceived[index] = qMax(chunkBytesReceived[index], received);
+    qint64 receivedTotal = 0;
+    for (qint64 bytes : std::as_const(chunkBytesReceived))
+    {
+        receivedTotal += bytes;
+    }
+    onDownloadProgress(qMin(receivedTotal, parallelTotalSize), parallelTotalSize);
+}
+
+void UpdateManager::onChunkFinished()
+{
+    UpdateDownloadWorker *worker = qobject_cast<UpdateDownloadWorker *>(sender());
+    if (!worker)
+    {
+        return;
+    }
+
+    if (!worker->succeeded())
+    {
+        parallelDownloadFailed = true;
+        if (parallelDownloadError.isEmpty())
+        {
+            parallelDownloadError = worker->errorString();
+        }
+        qWarning() << "更新分段下载失败:" << worker->errorString();
+        for (UpdateDownloadWorker *other : downloadWorkers)
+        {
+            if (other != worker && other->isRunning())
+            {
+                other->requestInterruption();
+            }
+        }
+    }
+
+    --activeChunkWorkers;
+    if (activeChunkWorkers != 0)
+    {
+        return;
+    }
+
+    for (UpdateDownloadWorker *finishedWorker : downloadWorkers)
+    {
+        finishedWorker->deleteLater();
+    }
+    downloadWorkers.clear();
+
+    if (downloadCanceled)
+    {
+        cleanupDownloadedParts();
+        if (progressDialog)
+        {
+            progressDialog->close();
+        }
+        emit downloadFinished(false);
+        return;
+    }
+
+    if (parallelDownloadFailed)
+    {
+        bool receivedAnyData = false;
+        for (qint64 bytes : std::as_const(chunkBytesReceived))
+        {
+            if (bytes > 0)
+            {
+                receivedAnyData = true;
+                break;
+            }
+        }
+        const QString error = parallelDownloadError;
+        cleanupDownloadedParts();
+        if (!receivedAnyData)
+        {
+            startSingleDownload();
+            return;
+        }
+        QMessageBox::critical(nullptr, tr("下载失败"),
+                              tr("下载更新失败: %1").arg(error));
+        if (progressDialog)
+        {
+            progressDialog->close();
+        }
+        emit downloadFinished(false);
+        return;
+    }
+
+    QString error;
+    if (!mergeDownloadedParts(error))
+    {
+        cleanupDownloadedParts();
+        QMessageBox::critical(nullptr, tr("保存失败"),
+                              tr("无法保存下载的文件: %1").arg(error));
+        if (progressDialog)
+        {
+            progressDialog->close();
+        }
+        emit downloadFinished(false);
+        return;
+    }
+
+    cleanupDownloadedParts();
+    qDebug() << "下载完成，文件大小:" << QFileInfo(downloadedFilePath).size() << "字节";
+    verifyAndInstall(downloadedFilePath);
+}
+
+bool UpdateManager::mergeDownloadedParts(QString &error)
+{
+    QSaveFile output(downloadedFilePath);
+    if (!output.open(QIODevice::WriteOnly))
+    {
+        error = output.errorString();
+        return false;
+    }
+
+    qint64 mergedBytes = 0;
+    for (int index = 0; index < 4; ++index)
+    {
+        QFile part(downloadPartsDirectory->filePath(QStringLiteral("part_%1").arg(index)));
+        if (!part.open(QIODevice::ReadOnly))
+        {
+            error = part.errorString();
+            output.cancelWriting();
+            return false;
+        }
+
+        while (!part.atEnd())
+        {
+            const QByteArray data = part.read(1024 * 1024);
+            if (data.isEmpty())
+            {
+                error = part.errorString();
+                output.cancelWriting();
+                return false;
+            }
+            if (output.write(data) != data.size())
+            {
+                error = output.errorString();
+                output.cancelWriting();
+                return false;
+            }
+            mergedBytes += data.size();
+        }
+    }
+
+    if (mergedBytes != parallelTotalSize)
+    {
+        error = QStringLiteral("Incomplete downloaded file");
+        output.cancelWriting();
+        return false;
+    }
+
+    if (!output.commit())
+    {
+        error = output.errorString();
+        return false;
+    }
+    return true;
+}
+
+void UpdateManager::cleanupDownloadedParts()
+{
+    downloadPartsDirectory.reset();
+    parallelTotalSize = 0;
+    activeChunkWorkers = 0;
+    parallelDownloadFailed = false;
+    parallelDownloadError.clear();
+    chunkBytesReceived.fill(0, 4);
+}
+
+void UpdateManager::startSingleDownload()
+{
+    if (downloadCanceled)
+    {
+        return;
+    }
+
+    if (progressDialog)
+    {
+        progressDialog->setValue(0);
+        progressDialog->setLabelText(tr("正在下载更新..."));
+    }
+
+    QUrl downloadUrlObj(downloadUrl);
+    QNetworkRequest downloadRequest(downloadUrlObj);
+    downloadRequest.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    downloadRequest.setAttribute(QNetworkRequest::Http2DirectAttribute, false);
+    downloadRequest.setRawHeader("User-Agent", QString("CompilerIDE/%1").arg(IDE_VERSION).toUtf8());
+    downloadRequest.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                                 QNetworkRequest::NoLessSafeRedirectPolicy);
 
     downloadReply = networkManager->get(downloadRequest);
     connect(downloadReply, &QNetworkReply::downloadProgress, this, &UpdateManager::onDownloadProgress);
@@ -13294,7 +17126,7 @@ void UpdateManager::onDownloadProgress(qint64 bytesReceived, qint64 bytesTotal)
     if (bytesTotal > 0 && progressDialog)
     {
         int progress = static_cast<int>((bytesReceived * 100) / bytesTotal);
-        progressDialog->setValue(progress);
+        progressDialog->setValue(qMax(progressDialog->value(), progress));
         QString sizeReceived = QString::number(bytesReceived / (1024.0 * 1024.0), 'f', 2);
         QString sizeTotal = QString::number(bytesTotal / (1024.0 * 1024.0), 'f', 2);
         progressDialog->setLabelText(tr("正在下载更新...\n%1 MB / %2 MB").arg(sizeReceived).arg(sizeTotal));
@@ -13404,39 +17236,7 @@ progressDialog = nullptr;
         progressDialog = nullptr;
     }
 
-    QDialog *countdownDialog = new QDialog();
-    countdownDialog->setWindowTitle(tr("安装更新"));
-    countdownDialog->setWindowFlags(Qt::WindowStaysOnTopHint | Qt::WindowCloseButtonHint);
-    countdownDialog->setAttribute(Qt::WA_DeleteOnClose);
-    QVBoxLayout *layout = new QVBoxLayout(countdownDialog);
-    QLabel *messageLabel = new QLabel(tr("更新已下载完成，将在3秒后关闭IDE并安装更新..."));
-    QLabel *countdownLabel = new QLabel("3");
-    countdownLabel->setAlignment(Qt::AlignCenter);
-    QFont font = countdownLabel->font();
-    font.setPointSize(48);
-    font.setBold(true);
-    countdownLabel->setFont(font);
-    layout->addWidget(messageLabel);
-    layout->addWidget(countdownLabel);
-    countdownDialog->resize(400, 200);
-    countdownDialog->show();
-
-    QTimer *countdownTimer = new QTimer(countdownDialog);
-    connect(countdownTimer, &QTimer::timeout, [countdownLabel]()
-            {
-                int val = countdownLabel->text().toInt();
-                if (val > 1)
-                {
-                    countdownLabel->setText(QString::number(val - 1));
-                }
-            });
-    countdownTimer->start(1000);
-
-    QTimer::singleShot(3000, [this, countdownDialog]()
-                       {
-                           countdownDialog->close();
-                           setupAutoUpdate();
-                       });
+    setupAutoUpdate();
 
     emit downloadFinished(true);
     emit updateReady();
@@ -13449,6 +17249,1274 @@ void UpdateManager::downloadAndUpdate()
         fetchExpectedSha256();
     }
 }
+
+struct CalculatorValue
+{
+    long double number = 0.0L;
+    qint64 integer = 0;
+    bool isInteger = true;
+};
+
+class CalculatorExpressionParser
+{
+public:
+    explicit CalculatorExpressionParser(const QString &expression)
+    {
+        m_expression = expression.trimmed();
+        m_expression.replace(QChar(0x00D7), QLatin1Char('*'));
+        m_expression.replace(QChar(0x00F7), QLatin1Char('/'));
+        m_expression.replace(QChar(0x2212), QLatin1Char('-'));
+        if (m_expression.endsWith(QLatin1Char('=')))
+        {
+            m_expression.chop(1);
+            m_expression = m_expression.trimmed();
+        }
+    }
+
+    bool evaluate(CalculatorValue &result, QString &error)
+    {
+        if (m_expression.isEmpty())
+        {
+            error = QStringLiteral("表达式为空");
+            return false;
+        }
+
+        if (!parseLogicalOr(result))
+        {
+            error = m_error.isEmpty() ? QStringLiteral("表达式无效") : m_error;
+            return false;
+        }
+
+        skipSpaces();
+        if (m_position != m_expression.size())
+        {
+            error = QStringLiteral("无法识别的位置：%1").arg(m_expression.mid(m_position));
+            return false;
+        }
+
+        if (!std::isfinite(static_cast<double>(result.number)))
+        {
+            error = QStringLiteral("计算结果不是有限数值");
+            return false;
+        }
+
+        return true;
+    }
+
+    static QString formatValue(const CalculatorValue &value)
+    {
+        if (value.isInteger)
+        {
+            return QString::number(value.integer);
+        }
+
+        const double number = static_cast<double>(value.number);
+        if (!std::isfinite(number))
+        {
+            return QStringLiteral("无效数值");
+        }
+
+        return QString::number(number, 'g', 15);
+    }
+
+private:
+    QString m_expression;
+    int m_position = 0;
+    QString m_error;
+
+    static CalculatorValue integerValue(qint64 value)
+    {
+        CalculatorValue result;
+        result.number = static_cast<long double>(value);
+        result.integer = value;
+        result.isInteger = true;
+        return result;
+    }
+
+    static CalculatorValue realValue(long double value)
+    {
+        CalculatorValue result;
+        result.number = value;
+        result.isInteger = false;
+        return result;
+    }
+
+    void setError(const QString &error)
+    {
+        if (m_error.isEmpty())
+        {
+            m_error = error;
+        }
+    }
+
+    void skipSpaces()
+    {
+        while (m_position < m_expression.size() && m_expression.at(m_position).isSpace())
+        {
+            ++m_position;
+        }
+    }
+
+    bool matchToken(const QString &token)
+    {
+        skipSpaces();
+        if (m_expression.mid(m_position, token.size()) == token)
+        {
+            m_position += token.size();
+            return true;
+        }
+        return false;
+    }
+
+    bool matchSingle(QChar token, QChar forbiddenNext = QChar())
+    {
+        skipSpaces();
+        if (m_position >= m_expression.size() || m_expression.at(m_position) != token)
+        {
+            return false;
+        }
+
+        if (!forbiddenNext.isNull() && m_position + 1 < m_expression.size() &&
+            m_expression.at(m_position + 1) == forbiddenNext)
+        {
+            return false;
+        }
+
+        ++m_position;
+        return true;
+    }
+
+    bool isTruthy(const CalculatorValue &value) const
+    {
+        return value.isInteger ? value.integer != 0 : value.number != 0.0L;
+    }
+
+    int compareValues(const CalculatorValue &left, const CalculatorValue &right) const
+    {
+        if (left.isInteger && right.isInteger)
+        {
+            if (left.integer < right.integer)
+            {
+                return -1;
+            }
+            if (left.integer > right.integer)
+            {
+                return 1;
+            }
+            return 0;
+        }
+
+        if (left.number < right.number)
+        {
+            return -1;
+        }
+        if (left.number > right.number)
+        {
+            return 1;
+        }
+        return 0;
+    }
+
+    bool requireIntegers(const CalculatorValue &left, const CalculatorValue &right)
+    {
+        if (!left.isInteger || !right.isInteger)
+        {
+            setError(QStringLiteral("位运算和取模要求整数操作数"));
+            return false;
+        }
+        return true;
+    }
+
+    bool tryAdd(qint64 left, qint64 right, qint64 &result) const
+    {
+        const qint64 minimum = std::numeric_limits<qint64>::min();
+        const qint64 maximum = std::numeric_limits<qint64>::max();
+        if ((right > 0 && left > maximum - right) ||
+            (right < 0 && left < minimum - right))
+        {
+            return false;
+        }
+        result = left + right;
+        return true;
+    }
+
+    bool trySubtract(qint64 left, qint64 right, qint64 &result) const
+    {
+        const qint64 minimum = std::numeric_limits<qint64>::min();
+        const qint64 maximum = std::numeric_limits<qint64>::max();
+        if ((right < 0 && left > maximum + right) ||
+            (right > 0 && left < minimum + right))
+        {
+            return false;
+        }
+        result = left - right;
+        return true;
+    }
+
+    bool tryMultiply(qint64 left, qint64 right, qint64 &result) const
+    {
+        const qint64 minimum = std::numeric_limits<qint64>::min();
+        const qint64 maximum = std::numeric_limits<qint64>::max();
+        if (left == 0 || right == 0)
+        {
+            result = 0;
+            return true;
+        }
+        if ((left == -1 && right == minimum) || (right == -1 && left == minimum))
+        {
+            return false;
+        }
+        if (left > 0)
+        {
+            if (right > 0 && left > maximum / right)
+            {
+                return false;
+            }
+            if (right < 0 && right < minimum / left)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (right > 0 && left < minimum / right)
+            {
+                return false;
+            }
+            if (right < 0 && left < maximum / right)
+            {
+                return false;
+            }
+        }
+        result = left * right;
+        return true;
+    }
+
+    bool applyPower(const CalculatorValue &base, const CalculatorValue &exponent, CalculatorValue &result)
+    {
+        const double computed = std::pow(static_cast<double>(base.number), static_cast<double>(exponent.number));
+        if (!std::isfinite(computed))
+        {
+            setError(QStringLiteral("乘方结果无效或溢出"));
+            return false;
+        }
+
+        const long double extended = static_cast<long double>(computed);
+        const long double minimum = static_cast<long double>(std::numeric_limits<qint64>::min());
+        const long double upperExclusive = -minimum;
+        if (std::trunc(extended) == extended && extended >= minimum && extended < upperExclusive)
+        {
+            result = integerValue(static_cast<qint64>(extended));
+        }
+        else
+        {
+            result = realValue(extended);
+        }
+        return true;
+    }
+
+    bool parseLogicalOr(CalculatorValue &result)
+    {
+        if (!parseLogicalAnd(result))
+        {
+            return false;
+        }
+        while (matchToken(QStringLiteral("||")))
+        {
+            CalculatorValue right;
+            if (!parseLogicalAnd(right))
+            {
+                return false;
+            }
+            result = integerValue(isTruthy(result) || isTruthy(right) ? 1 : 0);
+        }
+        return true;
+    }
+
+    bool parseLogicalAnd(CalculatorValue &result)
+    {
+        if (!parseBitwiseOr(result))
+        {
+            return false;
+        }
+        while (matchToken(QStringLiteral("&&")))
+        {
+            CalculatorValue right;
+            if (!parseBitwiseOr(right))
+            {
+                return false;
+            }
+            result = integerValue(isTruthy(result) && isTruthy(right) ? 1 : 0);
+        }
+        return true;
+    }
+
+    bool parseBitwiseOr(CalculatorValue &result)
+    {
+        if (!parseBitwiseXor(result))
+        {
+            return false;
+        }
+        while (matchSingle(QLatin1Char('|'), QLatin1Char('|')))
+        {
+            CalculatorValue right;
+            if (!parseBitwiseXor(right))
+            {
+                return false;
+            }
+            if (!requireIntegers(result, right))
+            {
+                return false;
+            }
+            result = integerValue(result.integer | right.integer);
+        }
+        return true;
+    }
+
+    bool parseBitwiseXor(CalculatorValue &result)
+    {
+        if (!parseBitwiseAnd(result))
+        {
+            return false;
+        }
+        while (matchSingle(QLatin1Char('^')))
+        {
+            CalculatorValue right;
+            if (!parseBitwiseAnd(right))
+            {
+                return false;
+            }
+            if (!requireIntegers(result, right))
+            {
+                return false;
+            }
+            result = integerValue(result.integer ^ right.integer);
+        }
+        return true;
+    }
+
+    bool parseBitwiseAnd(CalculatorValue &result)
+    {
+        if (!parseEquality(result))
+        {
+            return false;
+        }
+        while (matchSingle(QLatin1Char('&'), QLatin1Char('&')))
+        {
+            CalculatorValue right;
+            if (!parseEquality(right))
+            {
+                return false;
+            }
+            if (!requireIntegers(result, right))
+            {
+                return false;
+            }
+            result = integerValue(result.integer & right.integer);
+        }
+        return true;
+    }
+
+    bool parseEquality(CalculatorValue &result)
+    {
+        if (!parseRelational(result))
+        {
+            return false;
+        }
+        while (true)
+        {
+            bool equalOperator = false;
+            bool notEqualOperator = false;
+            if (matchToken(QStringLiteral("==")))
+            {
+                equalOperator = true;
+            }
+            else if (matchToken(QStringLiteral("!=")))
+            {
+                notEqualOperator = true;
+            }
+            else
+            {
+                break;
+            }
+
+            CalculatorValue right;
+            if (!parseRelational(right))
+            {
+                return false;
+            }
+            const int comparison = compareValues(result, right);
+            result = integerValue((equalOperator ? comparison == 0 : comparison != 0) ? 1 : 0);
+        }
+        return true;
+    }
+
+    bool parseRelational(CalculatorValue &result)
+    {
+        if (!parseShift(result))
+        {
+            return false;
+        }
+        while (true)
+        {
+            QString operation;
+            if (matchToken(QStringLiteral("<=")))
+            {
+                operation = QStringLiteral("<=");
+            }
+            else if (matchToken(QStringLiteral(">=")))
+            {
+                operation = QStringLiteral(">=");
+            }
+            else if (matchSingle(QLatin1Char('<'), QLatin1Char('<')))
+            {
+                operation = QStringLiteral("<");
+            }
+            else if (matchSingle(QLatin1Char('>'), QLatin1Char('>')))
+            {
+                operation = QStringLiteral(">");
+            }
+            else
+            {
+                break;
+            }
+
+            CalculatorValue right;
+            if (!parseShift(right))
+            {
+                return false;
+            }
+            const int comparison = compareValues(result, right);
+            bool matched = false;
+            if (operation == QStringLiteral("<="))
+            {
+                matched = comparison <= 0;
+            }
+            else if (operation == QStringLiteral(">="))
+            {
+                matched = comparison >= 0;
+            }
+            else if (operation == QStringLiteral("<"))
+            {
+                matched = comparison < 0;
+            }
+            else
+            {
+                matched = comparison > 0;
+            }
+            result = integerValue(matched ? 1 : 0);
+        }
+        return true;
+    }
+
+    bool parseShift(CalculatorValue &result)
+    {
+        if (!parseAdditive(result))
+        {
+            return false;
+        }
+        while (true)
+        {
+            bool leftShift = false;
+            bool rightShift = false;
+            if (matchToken(QStringLiteral("<<")))
+            {
+                leftShift = true;
+            }
+            else if (matchToken(QStringLiteral(">>")))
+            {
+                rightShift = true;
+            }
+            else
+            {
+                break;
+            }
+
+            CalculatorValue right;
+            if (!parseAdditive(right))
+            {
+                return false;
+            }
+            if (!requireIntegers(result, right))
+            {
+                return false;
+            }
+            if (right.integer < 0 || right.integer > 63)
+            {
+                setError(QStringLiteral("移位位数必须在 0 到 63 之间"));
+                return false;
+            }
+            if (leftShift)
+            {
+                const quint64 bits = static_cast<quint64>(result.integer);
+                result = integerValue(static_cast<qint64>(bits << right.integer));
+            }
+            else if (rightShift)
+            {
+                result = integerValue(result.integer >> right.integer);
+            }
+        }
+        return true;
+    }
+
+    bool parseAdditive(CalculatorValue &result)
+    {
+        if (!parseMultiplicative(result))
+        {
+            return false;
+        }
+        while (true)
+        {
+            bool addition = false;
+            bool subtraction = false;
+            if (matchSingle(QLatin1Char('+')))
+            {
+                addition = true;
+            }
+            else if (matchSingle(QLatin1Char('-')))
+            {
+                subtraction = true;
+            }
+            else
+            {
+                break;
+            }
+
+            CalculatorValue right;
+            if (!parseMultiplicative(right))
+            {
+                return false;
+            }
+            if (result.isInteger && right.isInteger)
+            {
+                qint64 computed = 0;
+                const bool valid = addition
+                                       ? tryAdd(result.integer, right.integer, computed)
+                                       : trySubtract(result.integer, right.integer, computed);
+                if (!valid)
+                {
+                    setError(QStringLiteral("整数运算溢出"));
+                    return false;
+                }
+                result = integerValue(computed);
+            }
+            else
+            {
+                result = realValue(addition ? result.number + right.number : result.number - right.number);
+            }
+        }
+        return true;
+    }
+
+    bool parseMultiplicative(CalculatorValue &result)
+    {
+        if (!parseUnary(result))
+        {
+            return false;
+        }
+        while (true)
+        {
+            bool multiplication = false;
+            bool division = false;
+            bool modulo = false;
+            if (matchSingle(QLatin1Char('*'), QLatin1Char('*')))
+            {
+                multiplication = true;
+            }
+            else if (matchSingle(QLatin1Char('/')))
+            {
+                division = true;
+            }
+            else if (matchSingle(QLatin1Char('%')))
+            {
+                modulo = true;
+            }
+            else
+            {
+                skipSpaces();
+                if (m_position < m_expression.size() &&
+                    (m_expression.at(m_position) == QChar(0x03C0) ||
+                     m_expression.at(m_position) == QLatin1Char('(')))
+                {
+                    multiplication = true;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            CalculatorValue right;
+            if (!parseUnary(right))
+            {
+                return false;
+            }
+            if (multiplication)
+            {
+                if (result.isInteger && right.isInteger)
+                {
+                    qint64 computed = 0;
+                    if (!tryMultiply(result.integer, right.integer, computed))
+                    {
+                        setError(QStringLiteral("整数运算溢出"));
+                        return false;
+                    }
+                    result = integerValue(computed);
+                }
+                else
+                {
+                    result = realValue(result.number * right.number);
+                }
+            }
+            else if (division)
+            {
+                if (right.number == 0.0L)
+                {
+                    setError(QStringLiteral("除数不能为 0"));
+                    return false;
+                }
+                if (result.isInteger && right.isInteger)
+                {
+                    const qint64 minimum = std::numeric_limits<qint64>::min();
+                    if (result.integer == minimum && right.integer == -1)
+                    {
+                        setError(QStringLiteral("整数运算溢出"));
+                        return false;
+                    }
+                    if (result.integer % right.integer == 0)
+                    {
+                        result = integerValue(result.integer / right.integer);
+                    }
+                    else
+                    {
+                        result = realValue(result.number / right.number);
+                    }
+                }
+                else
+                {
+                    result = realValue(result.number / right.number);
+                }
+            }
+            else
+            {
+                if (!requireIntegers(result, right))
+                {
+                    return false;
+                }
+                if (right.integer == 0)
+                {
+                    setError(QStringLiteral("取模的除数不能为 0"));
+                    return false;
+                }
+                if (result.integer == std::numeric_limits<qint64>::min() && right.integer == -1)
+                {
+                    result = integerValue(0);
+                }
+                else
+                {
+                    result = integerValue(result.integer % right.integer);
+                }
+            }
+        }
+        return true;
+    }
+
+    bool parseUnary(CalculatorValue &result)
+    {
+        if (matchSingle(QLatin1Char('+')))
+        {
+            return parseUnary(result);
+        }
+        if (matchSingle(QLatin1Char('-')))
+        {
+            if (!parseUnary(result))
+            {
+                return false;
+            }
+            if (result.isInteger)
+            {
+                if (result.integer == std::numeric_limits<qint64>::min())
+                {
+                    setError(QStringLiteral("整数运算溢出"));
+                    return false;
+                }
+                result = integerValue(-result.integer);
+            }
+            else
+            {
+                result = realValue(-result.number);
+            }
+            return true;
+        }
+        if (matchSingle(QLatin1Char('!'), QLatin1Char('=')))
+        {
+            if (!parseUnary(result))
+            {
+                return false;
+            }
+            result = integerValue(isTruthy(result) ? 0 : 1);
+            return true;
+        }
+        if (matchSingle(QLatin1Char('~')))
+        {
+            if (!parseUnary(result))
+            {
+                return false;
+            }
+            if (!result.isInteger)
+            {
+                setError(QStringLiteral("按位取反要求整数操作数"));
+                return false;
+            }
+            result = integerValue(~result.integer);
+            return true;
+        }
+        return parsePower(result);
+    }
+
+    bool parsePower(CalculatorValue &result)
+    {
+        if (!parsePrimary(result))
+        {
+            return false;
+        }
+        if (matchToken(QStringLiteral("**")))
+        {
+            CalculatorValue exponent;
+            if (!parseUnary(exponent))
+            {
+                return false;
+            }
+            CalculatorValue computed;
+            if (!applyPower(result, exponent, computed))
+            {
+                return false;
+            }
+            result = computed;
+        }
+        return true;
+    }
+
+    bool parsePrimary(CalculatorValue &result)
+    {
+        skipSpaces();
+        if (m_position >= m_expression.size())
+        {
+            setError(QStringLiteral("表达式不完整"));
+            return false;
+        }
+
+        if (matchToken(QStringLiteral("(")))
+        {
+            if (!parseLogicalOr(result))
+            {
+                return false;
+            }
+            if (!matchToken(QStringLiteral(")")))
+            {
+                setError(QStringLiteral("缺少右括号 )"));
+                return false;
+            }
+            return true;
+        }
+
+        const QChar current = m_expression.at(m_position);
+        if (current == QChar(0x03C0))
+        {
+            ++m_position;
+            result = realValue(3.14159265358979323846L);
+            return true;
+        }
+
+        if (current.isDigit() || current == QLatin1Char('.'))
+        {
+            return parseNumber(result);
+        }
+
+        if (current.isLetter() || current == QLatin1Char('_'))
+        {
+            const int start = m_position;
+            while (m_position < m_expression.size())
+            {
+                const QChar character = m_expression.at(m_position);
+                if (!character.isLetterOrNumber() && character != QLatin1Char('_'))
+                {
+                    break;
+                }
+                ++m_position;
+            }
+            const QString identifier = m_expression.mid(start, m_position - start).toLower();
+            if (identifier == QStringLiteral("pi"))
+            {
+                result = realValue(3.14159265358979323846L);
+                return true;
+            }
+            if (identifier == QStringLiteral("e"))
+            {
+                result = realValue(2.71828182845904523536L);
+                return true;
+            }
+            if (identifier == QStringLiteral("true"))
+            {
+                result = integerValue(1);
+                return true;
+            }
+            if (identifier == QStringLiteral("false"))
+            {
+                result = integerValue(0);
+                return true;
+            }
+            if (identifier == QStringLiteral("pow"))
+            {
+                if (!matchToken(QStringLiteral("(")))
+                {
+                    setError(QStringLiteral("pow 函数需要括号"));
+                    return false;
+                }
+                CalculatorValue base;
+                CalculatorValue exponent;
+                if (!parseLogicalOr(base))
+                {
+                    return false;
+                }
+                if (!matchToken(QStringLiteral(",")))
+                {
+                    setError(QStringLiteral("pow 函数需要两个参数，用逗号分隔"));
+                    return false;
+                }
+                if (!parseLogicalOr(exponent))
+                {
+                    return false;
+                }
+                if (!matchToken(QStringLiteral(")")))
+                {
+                    setError(QStringLiteral("pow 函数缺少右括号 )"));
+                    return false;
+                }
+                return applyPower(base, exponent, result);
+            }
+            setError(QStringLiteral("不支持的名称：%1").arg(identifier));
+            return false;
+        }
+
+        setError(QStringLiteral("意外字符：%1").arg(current));
+        return false;
+    }
+
+    bool parseNumber(CalculatorValue &result)
+    {
+        skipSpaces();
+        if (m_expression.mid(m_position, 2).compare(QStringLiteral("0x"), Qt::CaseInsensitive) == 0)
+        {
+            m_position += 2;
+            const int digitStart = m_position;
+            while (m_position < m_expression.size())
+            {
+                const QChar character = m_expression.at(m_position);
+                if (!character.isDigit() && !(character.toLower() >= QLatin1Char('a') && character.toLower() <= QLatin1Char('f')))
+                {
+                    break;
+                }
+                ++m_position;
+            }
+            if (digitStart == m_position)
+            {
+                setError(QStringLiteral("十六进制数缺少数字"));
+                return false;
+            }
+            bool ok = false;
+            const qulonglong value = m_expression.mid(digitStart, m_position - digitStart).toULongLong(&ok, 16);
+            if (!ok)
+            {
+                setError(QStringLiteral("十六进制数超出范围"));
+                return false;
+            }
+            result = integerValue(static_cast<qint64>(value));
+            return true;
+        }
+
+        if (m_expression.mid(m_position, 2).compare(QStringLiteral("0b"), Qt::CaseInsensitive) == 0)
+        {
+            m_position += 2;
+            const int digitStart = m_position;
+            while (m_position < m_expression.size() &&
+                   (m_expression.at(m_position) == QLatin1Char('0') || m_expression.at(m_position) == QLatin1Char('1')))
+            {
+                ++m_position;
+            }
+            if (digitStart == m_position)
+            {
+                setError(QStringLiteral("二进制数缺少数字"));
+                return false;
+            }
+            bool ok = false;
+            const qulonglong value = m_expression.mid(digitStart, m_position - digitStart).toULongLong(&ok, 2);
+            if (!ok)
+            {
+                setError(QStringLiteral("二进制数超出范围"));
+                return false;
+            }
+            result = integerValue(static_cast<qint64>(value));
+            return true;
+        }
+
+        const int start = m_position;
+        bool hasDigit = false;
+        bool hasDecimalPoint = false;
+        bool hasExponent = false;
+        while (m_position < m_expression.size() && m_expression.at(m_position).isDigit())
+        {
+            hasDigit = true;
+            ++m_position;
+        }
+        if (m_position < m_expression.size() && m_expression.at(m_position) == QLatin1Char('.'))
+        {
+            hasDecimalPoint = true;
+            ++m_position;
+            while (m_position < m_expression.size() && m_expression.at(m_position).isDigit())
+            {
+                hasDigit = true;
+                ++m_position;
+            }
+        }
+        if (!hasDigit)
+        {
+            setError(QStringLiteral("数字格式无效"));
+            return false;
+        }
+        if (m_position < m_expression.size() &&
+            (m_expression.at(m_position) == QLatin1Char('e') || m_expression.at(m_position) == QLatin1Char('E')))
+        {
+            hasExponent = true;
+            ++m_position;
+            if (m_position < m_expression.size() &&
+                (m_expression.at(m_position) == QLatin1Char('+') || m_expression.at(m_position) == QLatin1Char('-')))
+            {
+                ++m_position;
+            }
+            const int exponentStart = m_position;
+            while (m_position < m_expression.size() && m_expression.at(m_position).isDigit())
+            {
+                ++m_position;
+            }
+            if (exponentStart == m_position)
+            {
+                setError(QStringLiteral("科学计数法缺少指数"));
+                return false;
+            }
+        }
+
+        const QString literal = m_expression.mid(start, m_position - start);
+        if (!hasDecimalPoint && !hasExponent)
+        {
+            bool signedOk = false;
+            const qlonglong signedValue = literal.toLongLong(&signedOk, 10);
+            if (signedOk)
+            {
+                result = integerValue(static_cast<qint64>(signedValue));
+                return true;
+            }
+            bool unsignedOk = false;
+            const qulonglong unsignedValue = literal.toULongLong(&unsignedOk, 10);
+            if (unsignedOk)
+            {
+                result = integerValue(static_cast<qint64>(unsignedValue));
+                return true;
+            }
+            setError(QStringLiteral("整数超出范围"));
+            return false;
+        }
+
+        bool ok = false;
+        const double value = literal.toDouble(&ok);
+        if (!ok || !std::isfinite(value))
+        {
+            setError(QStringLiteral("数字格式无效或超出范围"));
+            return false;
+        }
+        result = realValue(static_cast<long double>(value));
+        return true;
+    }
+};
+
+class CalculatorWidget : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit CalculatorWidget(QWidget *parent = nullptr)
+        : QWidget(parent)
+    {
+        setObjectName(QStringLiteral("CalculatorWidget"));
+
+        QVBoxLayout *mainLayout = new QVBoxLayout(this);
+        mainLayout->setContentsMargins(12, 12, 12, 12);
+        mainLayout->setSpacing(8);
+
+        historyEdit = new QPlainTextEdit(this);
+        historyEdit->setReadOnly(true);
+        historyEdit->setMinimumHeight(100);
+        historyEdit->setMaximumHeight(150);
+        historyEdit->document()->setMaximumBlockCount(200);
+        mainLayout->addWidget(historyEdit);
+
+        expressionEdit = new QLineEdit(this);
+        expressionEdit->setClearButtonEnabled(true);
+        expressionEdit->setToolTip(tr("输入表达式，按 Enter 计算"));
+        expressionEdit->setMinimumHeight(34);
+        connect(expressionEdit, &QLineEdit::returnPressed, this, &CalculatorWidget::evaluateCurrentExpression);
+        mainLayout->addWidget(expressionEdit);
+
+        QGridLayout *keypadLayout = new QGridLayout;
+        keypadLayout->setContentsMargins(0, 0, 0, 0);
+        keypadLayout->setHorizontalSpacing(6);
+        keypadLayout->setVerticalSpacing(6);
+
+        const QString labels[8][5] = {
+            {QStringLiteral("C"), QStringLiteral("⌫"), QStringLiteral("("), QStringLiteral(")"), QStringLiteral("÷")},
+            {QStringLiteral("7"), QStringLiteral("8"), QStringLiteral("9"), QStringLiteral("×"), QStringLiteral("xʸ")},
+            {QStringLiteral("4"), QStringLiteral("5"), QStringLiteral("6"), QStringLiteral("-"), QStringLiteral("%")},
+            {QStringLiteral("1"), QStringLiteral("2"), QStringLiteral("3"), QStringLiteral("+"), QStringLiteral("π")},
+            {QStringLiteral("0"), QStringLiteral("."), QStringLiteral("<<"), QStringLiteral(">>"), QStringLiteral("^")},
+            {QStringLiteral("&&"), QStringLiteral("|"), QStringLiteral("~"), QStringLiteral("!"), QStringLiteral("&&&&")},
+            {QStringLiteral("||"), QStringLiteral("=="), QStringLiteral("!="), QStringLiteral("<="), QStringLiteral(">=")},
+            {QStringLiteral("<"), QStringLiteral(">"), QStringLiteral("e"), QStringLiteral("true"), QStringLiteral("false")}};
+        const QString tokens[8][5] = {
+            {QStringLiteral("C"), QStringLiteral("⌫"), QStringLiteral("("), QStringLiteral(")"), QStringLiteral("/")},
+            {QStringLiteral("7"), QStringLiteral("8"), QStringLiteral("9"), QStringLiteral("*"), QStringLiteral("**")},
+            {QStringLiteral("4"), QStringLiteral("5"), QStringLiteral("6"), QStringLiteral("-"), QStringLiteral("%")},
+            {QStringLiteral("1"), QStringLiteral("2"), QStringLiteral("3"), QStringLiteral("+"), QStringLiteral("π")},
+            {QStringLiteral("0"), QStringLiteral("."), QStringLiteral("<<"), QStringLiteral(">>"), QStringLiteral("^")},
+            {QStringLiteral("&"), QStringLiteral("|"), QStringLiteral("~"), QStringLiteral("!"), QStringLiteral("&&")},
+            {QStringLiteral("||"), QStringLiteral("=="), QStringLiteral("!="), QStringLiteral("<="), QStringLiteral(">=")},
+            {QStringLiteral("<"), QStringLiteral(">"), QStringLiteral("e"), QStringLiteral("true"), QStringLiteral("false")}};
+
+        for (int row = 0; row < 8; ++row)
+        {
+            keypadLayout->setRowStretch(row, 1);
+            for (int column = 0; column < 5; ++column)
+            {
+                const QString label = labels[row][column];
+                const QString token = tokens[row][column];
+                QPushButton *button = new QPushButton(label, this);
+                button->setMinimumHeight(32);
+                button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+                if (label == QStringLiteral("C"))
+                {
+                    button->setObjectName(QStringLiteral("CalculatorClear"));
+                }
+                else if (label == QStringLiteral("⌫"))
+                {
+                    button->setObjectName(QStringLiteral("CalculatorBackspace"));
+                }
+                else if (token == QStringLiteral("π") || token == QStringLiteral("e") ||
+                         token == QStringLiteral("true") || token == QStringLiteral("false"))
+                {
+                    button->setObjectName(QStringLiteral("CalculatorConstant"));
+                }
+                else if (token.size() == 1 && token.at(0).isDigit())
+                {
+                    button->setObjectName(QStringLiteral("CalculatorDigit"));
+                }
+                else
+                {
+                    button->setObjectName(QStringLiteral("CalculatorOperator"));
+                }
+
+                if (token == QStringLiteral("**"))
+                {
+                    button->setToolTip(tr("乘方，插入 **"));
+                }
+                else if (token == QStringLiteral("π"))
+                {
+                    button->setToolTip(tr("圆周率 π"));
+                }
+                else if (token == QStringLiteral("&"))
+                {
+                    button->setToolTip(tr("按位与 (&)"));
+                }
+                else if (token == QStringLiteral("&&"))
+                {
+                    button->setToolTip(tr("逻辑与 (&&)"));
+                }
+                else if (token == QStringLiteral("|"))
+                {
+                    button->setToolTip(tr("按位或 (|)"));
+                }
+                else if (token == QStringLiteral("||"))
+                {
+                    button->setToolTip(tr("逻辑或 (||)"));
+                }
+                else if (token == QStringLiteral("^"))
+                {
+                    button->setToolTip(tr("按位异或 (^)，乘方请使用 **"));
+                }
+
+                connect(button, &QPushButton::clicked, this, [this, label, token]()
+                {
+                    if (label == QStringLiteral("C"))
+                    {
+                        expressionEdit->clear();
+                    }
+                    else if (label == QStringLiteral("⌫"))
+                    {
+                        expressionEdit->backspace();
+                    }
+                    else
+                    {
+                        expressionEdit->insert(token);
+                    }
+                    expressionEdit->setFocus();
+                });
+                keypadLayout->addWidget(button, row, column);
+            }
+        }
+
+        QPushButton *equalsButton = new QPushButton(tr("=  计算"), this);
+        equalsButton->setObjectName(QStringLiteral("CalculatorEquals"));
+        equalsButton->setMinimumHeight(38);
+        equalsButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        connect(equalsButton, &QPushButton::clicked, this, &CalculatorWidget::evaluateCurrentExpression);
+        keypadLayout->addWidget(equalsButton, 8, 0, 1, 5);
+        mainLayout->addLayout(keypadLayout, 1);
+
+        QPushButton *clearHistoryButton = new QPushButton(tr("清空历史记录"), this);
+        connect(clearHistoryButton, &QPushButton::clicked, historyEdit, &QPlainTextEdit::clear);
+        mainLayout->addWidget(clearHistoryButton);
+
+        setTheme(ThemeMode::Dark);
+    }
+
+    void setTheme(ThemeMode mode)
+    {
+        QString backgroundColor;
+        QString panelColor;
+        QString textColor;
+        QString borderColor;
+        QString inputColor;
+        QString buttonColor;
+        QString hoverColor;
+        QString accentColor;
+        QString accentHoverColor;
+        QString mutedColor;
+        QString clearColor;
+
+        if (mode == ThemeMode::Dark)
+        {
+            backgroundColor = QStringLiteral("#1E1E1E");
+            panelColor = QStringLiteral("#252526");
+            textColor = QStringLiteral("#D4D4D4");
+            borderColor = QStringLiteral("#3C3C3C");
+            inputColor = QStringLiteral("#2D2D30");
+            buttonColor = QStringLiteral("#333337");
+            hoverColor = QStringLiteral("#414147");
+            accentColor = QStringLiteral("#0E639C");
+            accentHoverColor = QStringLiteral("#1177BB");
+            mutedColor = QStringLiteral("#9DA0A6");
+            clearColor = QStringLiteral("#F14C4F");
+        }
+        else if (mode == ThemeMode::EyeCare)
+        {
+            backgroundColor = QStringLiteral("#FDF6E3");
+            panelColor = QStringLiteral("#F8EFCF");
+            textColor = QStringLiteral("#3B3A32");
+            borderColor = QStringLiteral("#C7B98E");
+            inputColor = QStringLiteral("#FDF6E3");
+            buttonColor = QStringLiteral("#E9DDBB");
+            hoverColor = QStringLiteral("#DFD1AA");
+            accentColor = QStringLiteral("#6F8F5B");
+            accentHoverColor = QStringLiteral("#5D7B4C");
+            mutedColor = QStringLiteral("#6B6658");
+            clearColor = QStringLiteral("#F14C4F");
+        }
+        else
+        {
+            backgroundColor = QStringLiteral("#F7F8FA");
+            panelColor = QStringLiteral("#FFFFFF");
+            textColor = QStringLiteral("#202124");
+            borderColor = QStringLiteral("#D5D9E0");
+            inputColor = QStringLiteral("#FFFFFF");
+            buttonColor = QStringLiteral("#EEF1F5");
+            hoverColor = QStringLiteral("#E2E7EF");
+            accentColor = QStringLiteral("#0D6EFD");
+            accentHoverColor = QStringLiteral("#0B5ED7");
+            mutedColor = QStringLiteral("#656D78");
+            clearColor = QStringLiteral("#F14C4F");
+        }
+
+        QString calculatorStyle = QStringLiteral(
+            "QWidget#CalculatorWidget { background-color: %1; color: %2; }"
+            "QLabel { color: %2; font-size: 11px; }"
+            "QPlainTextEdit { background-color: %3; color: %2; border: 1px solid %4; border-radius: 6px; padding: 6px; selection-background-color: %8; }"
+            "QLineEdit { background-color: %5; color: %2; border: 1px solid %4; border-radius: 6px; padding: 6px 8px; selection-background-color: %8; }"
+            "QLineEdit:focus { border: 1px solid %8; }"
+            "QPushButton { background-color: %6; color: %2; border: 1px solid %4; border-radius: 6px; padding: 4px; font-size: 12px; }"
+            "QPushButton:hover { background-color: %7; }"
+            "QPushButton:pressed { background-color: %8; color: white; }"
+            "QPushButton#CalculatorEquals { background-color: %8; color: white; border: none; font-weight: bold; }"
+            "QPushButton#CalculatorEquals:hover { background-color: %9; }"
+            "QPushButton#CalculatorClear { color: %10; font-weight: bold; }"
+            "QPushButton#CalculatorClear:hover { background-color: %7; }"
+            "QPushButton#CalculatorClear:pressed { background-color: %8; color: %10; }"
+            "QPushButton#CalculatorBackspace { font-size: 14px; }"
+            "QPushButton#CalculatorOperator { font-weight: bold; }"
+            "QPushButton#CalculatorConstant { background-color: %6; color: %2; border: 1px solid %4; border-radius: 6px; padding: 4px; font-size: 12px; font-weight: normal; }"
+            "QPushButton#CalculatorConstant:hover { background-color: %7; color: %2; }"
+            "QPushButton#CalculatorConstant:pressed { background-color: %8; color: white; }"
+            "QPlainTextEdit::placeholder { color: %11; }"
+            "QLineEdit::placeholder { color: %11; }");
+        calculatorStyle = calculatorStyle.arg(backgroundColor);
+        calculatorStyle = calculatorStyle.arg(textColor);
+        calculatorStyle = calculatorStyle.arg(panelColor);
+        calculatorStyle = calculatorStyle.arg(borderColor);
+        calculatorStyle = calculatorStyle.arg(inputColor);
+        calculatorStyle = calculatorStyle.arg(buttonColor);
+        calculatorStyle = calculatorStyle.arg(hoverColor);
+        calculatorStyle = calculatorStyle.arg(accentColor);
+        calculatorStyle = calculatorStyle.arg(accentHoverColor);
+        calculatorStyle = calculatorStyle.arg(clearColor);
+        calculatorStyle = calculatorStyle.arg(mutedColor);
+        setStyleSheet(calculatorStyle);
+    }
+
+private slots:
+    void evaluateCurrentExpression()
+    {
+        const QString rawExpression = expressionEdit->text().trimmed();
+        if (rawExpression.isEmpty())
+        {
+            return;
+        }
+
+        QString displayExpression = rawExpression;
+        if (displayExpression.endsWith(QLatin1Char('=')))
+        {
+            displayExpression.chop(1);
+            displayExpression = displayExpression.trimmed();
+        }
+
+        CalculatorExpressionParser parser(rawExpression);
+        CalculatorValue result;
+        QString error;
+        if (parser.evaluate(result, error))
+        {
+            historyEdit->appendPlainText(QStringLiteral("%1 = %2")
+                                              .arg(displayExpression, CalculatorExpressionParser::formatValue(result)));
+        }
+        else
+        {
+            historyEdit->appendPlainText(QStringLiteral("%1 = 错误：%2").arg(displayExpression, error));
+        }
+
+        expressionEdit->clear();
+        expressionEdit->setFocus();
+    }
+
+private:
+    QPlainTextEdit *historyEdit = nullptr;
+    QLineEdit *expressionEdit = nullptr;
+};
 
 class CompilerIDE;
 
@@ -13464,6 +18532,8 @@ public:
     void setDarkTheme(bool dark);
     void setFeatureEnabled(const QString &name, bool enabled);
     bool isFeatureEnabled(const QString &name) const;
+    void setFeatureVisible(const QString &name, bool visible);
+    bool isFeatureVisible(const QString &name) const;
     bool isExpanded() const;
     int animatedWidth() const;
     void setAnimatedWidth(int width);
@@ -13479,9 +18549,11 @@ private:
     void updateButtonIcon(QPushButton *btn, const QString &pageName, bool dark);
     void collapse();
     void expand();
+    void updateContentClipGeometry();
     QDockWidget *parentDockWidget() const;
 
     QMap<QString, bool> featureEnabledMap;
+    QMap<QString, bool> featureVisibleMap;
     int m_currentIndex;
     QStackedWidget *contentStack;
     QVBoxLayout *navLayout;
@@ -13491,6 +18563,7 @@ private:
     bool currentThemeIsDark;
     QWidget *rightPart;
     QWidget *activityBar;
+    QWidget *contentClip;
     QPropertyAnimation *widthAnimation;
     int m_expandedWidth;
     bool m_collapseAfterAnimation;
@@ -13498,7 +18571,7 @@ private:
 
 SideBarContainer::SideBarContainer(QWidget *parent)
     : QWidget(parent), currentThemeIsDark(true), m_currentIndex(-1), rightPart(nullptr), activityBar(nullptr),
-      widthAnimation(nullptr), m_expandedWidth(400), m_collapseAfterAnimation(false)
+      contentClip(nullptr), widthAnimation(nullptr), m_expandedWidth(485), m_collapseAfterAnimation(false)
 {
     setupUI();
     widthAnimation = new QPropertyAnimation(this, "animatedWidth", this);
@@ -13514,26 +18587,34 @@ SideBarContainer::SideBarContainer(QWidget *parent)
                     {
                         rightPart->hide();
                     }
+
                     setFixedWidth(45);
+                    updateContentClipGeometry();
+
                     if (dock)
                     {
-                        const int frameWidth = dock->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, dock);
-                        const int collapsedDockWidth = 45 + qMax(0, frameWidth) * 2;
-                        dock->setMinimumWidth(collapsedDockWidth);
-                        dock->setMaximumWidth(collapsedDockWidth);
-                        dock->resize(collapsedDockWidth, dock->height());
+                        QMainWindow *mainWindow = qobject_cast<QMainWindow *>(dock->window());
+                        if (mainWindow && mainWindow->dockWidgetArea(dock) != Qt::NoDockWidgetArea)
+                        {
+                            mainWindow->resizeDocks(QList<QDockWidget *>{dock}, QList<int>{45}, Qt::Horizontal);
+                        }
+                        else
+                        {
+                            dock->updateGeometry();
+                        }
                     }
+
                     return;
                 }
 
-                setMinimumWidth(0);
+                setMinimumWidth(485);
                 setMaximumWidth(QWIDGETSIZE_MAX);
                 setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+                updateContentClipGeometry();
 
                 if (dock)
                 {
-                    dock->setMinimumWidth(0);
-                    dock->setMaximumWidth(QWIDGETSIZE_MAX);
+                    dock->updateGeometry();
                 }
             });
     this->hide();
@@ -13554,33 +18635,56 @@ void SideBarContainer::setAnimatedWidth(int width)
     const int boundedWidth = qMax(45, width);
     setMinimumWidth(boundedWidth);
     setMaximumWidth(boundedWidth);
-    resize(boundedWidth, height());
 
     QDockWidget *dock = parentDockWidget();
     if (dock)
     {
-        const int frameWidth = dock->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, dock);
-        const int dockWidth = boundedWidth + qMax(0, frameWidth) * 2;
-        dock->setMinimumWidth(dockWidth);
-        dock->setMaximumWidth(dockWidth);
-        dock->resize(dockWidth, dock->height());
-        dock->updateGeometry();
+        QMainWindow *mainWindow = qobject_cast<QMainWindow *>(dock->window());
+        if (mainWindow && mainWindow->dockWidgetArea(dock) != Qt::NoDockWidgetArea)
+        {
+            mainWindow->resizeDocks(QList<QDockWidget *>{dock}, QList<int>{boundedWidth}, Qt::Horizontal);
+        }
+        else
+        {
+            resize(boundedWidth, height());
+        }
+    }
+    else
+    {
+        resize(boundedWidth, height());
     }
 
+    updateContentClipGeometry();
     updateGeometry();
+    update();
+}
 
-    if (parentWidget())
+void SideBarContainer::updateContentClipGeometry()
+{
+    if (!contentClip || !rightPart)
     {
-        parentWidget()->updateGeometry();
-        if (parentWidget()->layout())
-        {
-            parentWidget()->layout()->activate();
-        }
+        return;
+    }
 
-        if (parentWidget()->parentWidget() && parentWidget()->parentWidget()->layout())
-        {
-            parentWidget()->parentWidget()->layout()->activate();
-        }
+    int contentWidth = qMax(0, contentClip->width());
+
+    if (widthAnimation && widthAnimation->state() == QAbstractAnimation::Running)
+    {
+        const int animationWidth = m_collapseAfterAnimation
+                                       ? widthAnimation->startValue().toInt()
+                                       : widthAnimation->endValue().toInt();
+        contentWidth = qMax(contentWidth, qMax(0, animationWidth - 45));
+    }
+    else if (m_collapseAfterAnimation)
+    {
+        contentWidth = qMax(contentWidth, qMax(0, m_expandedWidth - 45));
+    }
+
+    rightPart->setGeometry(0, 0, contentWidth, contentClip->height());
+
+    if (activityBar)
+    {
+        activityBar->raise();
     }
 }
 
@@ -13621,6 +18725,7 @@ void SideBarContainer::addPage(const QString &name, QWidget *widget)
     hoverAnimation->setEasingCurve(QEasingCurve::OutCubic);
 
     featureEnabledMap[name] = true;
+    featureVisibleMap[name] = true;
 
     int index = contentStack->count() - 1;
 
@@ -13684,6 +18789,11 @@ QString SideBarContainer::getCurrentFeatureName() const
 
 void SideBarContainer::switchToFeature(const QString &name)
 {
+    if (!isFeatureVisible(name) || !isFeatureEnabled(name))
+    {
+        return;
+    }
+
     int index = pageNames.indexOf(name);
     if (index >= 0 && index < navButtons.size())
     {
@@ -13733,6 +18843,16 @@ void SideBarContainer::setDarkTheme(bool dark)
 
 bool SideBarContainer::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == contentClip)
+    {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::Show)
+        {
+            updateContentClipGeometry();
+        }
+
+        return QWidget::eventFilter(watched, event);
+    }
+
     QPushButton *hoverButton = qobject_cast<QPushButton *>(watched);
     QPropertyAnimation *hoverAnimation = hoverButton
                                              ? hoverButton->findChild<QPropertyAnimation *>("SideBarHoverAnimation")
@@ -13789,7 +18909,7 @@ void SideBarContainer::setupUI()
 {
     setObjectName("SideBarRoot");
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
-    setMinimumWidth(0);
+    setMinimumWidth(45);
 
     QHBoxLayout *mainLayout = new QHBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
@@ -13803,7 +18923,13 @@ void SideBarContainer::setupUI()
     navLayout->setSpacing(0);
     navLayout->setAlignment(Qt::AlignTop);
 
-    rightPart = new QWidget;
+    contentClip = new QWidget;
+    contentClip->setObjectName("SideBarContentClip");
+    contentClip->setMinimumWidth(0);
+    contentClip->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    contentClip->installEventFilter(this);
+
+    rightPart = new QWidget(contentClip);
     QVBoxLayout *rightLayout = new QVBoxLayout(rightPart);
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(0);
@@ -13823,7 +18949,9 @@ void SideBarContainer::setupUI()
     rightLayout->addWidget(contentStack);
 
     mainLayout->addWidget(activityBar);
-    mainLayout->addWidget(rightPart, 1);
+    mainLayout->addWidget(contentClip, 1);
+    activityBar->raise();
+    updateContentClipGeometry();
 
     collapse();
 }
@@ -13832,6 +18960,7 @@ void SideBarContainer::updateButtonIcon(QPushButton *btn, const QString &pageNam
 {
     QString suffix = dark ? "dark" : "light";
     QString prefix;
+    QString iconPath;
     if (pageName == "项目管理器")
     {
         prefix = "project_manager";
@@ -13848,7 +18977,7 @@ void SideBarContainer::updateButtonIcon(QPushButton *btn, const QString &pageNam
     {
         prefix = "outline";
     }
-    else if (pageName == "诊断工具")
+    else if (pageName == "任务管理器")
     {
         prefix = "diagnostic";
     }
@@ -13872,18 +19001,88 @@ void SideBarContainer::updateButtonIcon(QPushButton *btn, const QString &pageNam
     {
         prefix = "tester";
     }
+    else if (pageName == "交互题检查")
+    {
+        iconPath = QStringLiteral(":/icons/plugs_use_in_%1_mode.svg").arg(suffix);
+    }
+    else if (pageName == "计算器")
+    {
+        iconPath = QStringLiteral(":/icons/calculator_use_in_%1_mode.svg").arg(dark ? "dark" : "light");
+    }
     else
     {
         return;
     }
 
-    QString iconPath = QString(":/icons/%1_%2.svg").arg(prefix, suffix);
+    if (iconPath.isEmpty())
+    {
+        iconPath = QString(":/icons/%1_%2.svg").arg(prefix, suffix);
+    }
+
+    if (!QFile::exists(iconPath) && pageName == "交互题检查")
+    {
+        const QString fileName = QStringLiteral("plugs_use_in_%1_mode.svg").arg(suffix);
+        const QStringList candidates = {
+            QCoreApplication::applicationDirPath() + QLatin1Char('/') + fileName,
+            QCoreApplication::applicationDirPath() + QStringLiteral("/icons/") + fileName,
+            QDir::current().absoluteFilePath(fileName),
+            QDir::current().absoluteFilePath(QStringLiteral("icons/") + fileName)};
+        for (const QString &candidate : candidates)
+        {
+            if (QFile::exists(candidate))
+            {
+                iconPath = candidate;
+                break;
+            }
+        }
+    }
+
+    if (!QFile::exists(iconPath) && pageName == "计算器")
+    {
+        const QString fileName = QStringLiteral("calculator_use_in_%1_mode.svg").arg(dark ? "dark" : "light");
+        const QStringList candidates = {
+            QCoreApplication::applicationDirPath() + QLatin1Char('/') + fileName,
+            QCoreApplication::applicationDirPath() + QStringLiteral("/icons/") + fileName,
+            QDir::current().absoluteFilePath(fileName),
+            QDir::current().absoluteFilePath(QStringLiteral("icons/") + fileName)};
+        for (const QString &candidate : candidates)
+        {
+            if (QFile::exists(candidate))
+            {
+                iconPath = candidate;
+                break;
+            }
+        }
+    }
+
     if (QFile::exists(iconPath))
     {
         QIcon icon(iconPath);
         btn->setIcon(icon);
         btn->setIconSize(QSize(20, 20));
         btn->setText("");
+    }
+    else if (pageName == "交互题检查")
+    {
+        QPixmap pixmap(32, 32);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPen pen(dark ? QColor("#D6E4FF") : QColor("#48556D"), 2.4,
+                 Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawLine(QPointF(8, 5), QPointF(13, 10));
+        painter.drawLine(QPointF(14, 3), QPointF(19, 8));
+        painter.drawLine(QPointF(6, 11), QPointF(11, 16));
+        painter.drawArc(QRectF(6, 8, 13, 15), 45 * 16, 180 * 16);
+        painter.drawLine(QPointF(13, 23), QPointF(18, 28));
+        painter.drawLine(QPointF(24, 27), QPointF(19, 22));
+        painter.drawLine(QPointF(26, 21), QPointF(21, 16));
+        painter.end();
+        btn->setIcon(QIcon(pixmap));
+        btn->setIconSize(QSize(21, 21));
+        btn->setText(QString());
     }
     else
     {
@@ -13921,6 +19120,23 @@ bool SideBarContainer::isFeatureEnabled(const QString &name) const
     return featureEnabledMap.value(name, true);
 }
 
+void SideBarContainer::setFeatureVisible(const QString &name, bool visible)
+{
+    const int index = pageNames.indexOf(name);
+    if (index < 0 || index >= navButtons.size())
+    {
+        return;
+    }
+
+    featureVisibleMap[name] = visible;
+    navButtons.at(index)->setVisible(visible);
+}
+
+bool SideBarContainer::isFeatureVisible(const QString &name) const
+{
+    return featureVisibleMap.value(name, true);
+}
+
 void SideBarContainer::collapse()
 {
     if (rightPart && rightPart->isVisible())
@@ -13940,11 +19156,11 @@ void SideBarContainer::collapse()
         {
             if (wasExpanding)
             {
-                m_expandedWidth = qBound(280, previousAnimationTarget, 700);
+                m_expandedWidth = qMax(485, previousAnimationTarget);
             }
             else
             {
-                m_expandedWidth = qBound(280, width(), 700);
+                m_expandedWidth = qMax(485, width());
             }
         }
 
@@ -13960,16 +19176,22 @@ void SideBarContainer::collapse()
 
         m_currentIndex = -1;
         m_collapseAfterAnimation = true;
+        rightPart->show();
 
         if (!isVisible() || width() <= 45 || !widthAnimation)
         {
-            rightPart->hide();
             setAnimatedWidth(45);
+            rightPart->hide();
             return;
         }
 
         widthAnimation->setStartValue(width());
         widthAnimation->setEndValue(45);
+        rightPart->setGeometry(0, 0, qMax(0, width() - 45), contentClip ? contentClip->height() : height());
+        if (activityBar)
+        {
+            activityBar->raise();
+        }
         widthAnimation->start();
     }
 }
@@ -13981,38 +19203,87 @@ void SideBarContainer::expand()
         return;
     }
 
+    const QWidget *topLevelWindow = window();
+    const bool initialExpansion =
+        topLevelWindow &&
+        !topLevelWindow->property("sidebarInitialExpandDone").toBool();
+
+    const bool stableExpanded = !initialExpansion &&
+                                rightPart->isVisible() &&
+                                !m_collapseAfterAnimation &&
+                                (!widthAnimation ||
+                                 widthAnimation->state() != QAbstractAnimation::Running) &&
+                                width() > 45;
+
+    if (stableExpanded)
+    {
+        m_expandedWidth = qMax(485, width());
+    }
+
     if (widthAnimation)
     {
         widthAnimation->stop();
     }
-    if (this->isHidden())
+
+    if (isHidden())
     {
-        this->show();
+        show();
     }
 
     m_collapseAfterAnimation = false;
-    rightPart->show();
 
     const int startWidth = qMax(45, width());
-    const int targetWidth = qBound(280, m_expandedWidth, 700);
+    const int targetWidth = qMax(485, m_expandedWidth);
+
+    rightPart->setGeometry(
+        0,
+        0,
+        qMax(0, targetWidth - 45),
+        contentClip ? contentClip->height() : height());
+
+    rightPart->show();
+
+    if (activityBar)
+    {
+        activityBar->raise();
+    }
+
+    if (initialExpansion)
+    {
+        setAnimatedWidth(targetWidth);
+        m_expandedWidth = targetWidth;
+        setMinimumWidth(targetWidth);
+        setMaximumWidth(QWIDGETSIZE_MAX);
+        setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+        updateContentClipGeometry();
+
+        QDockWidget *dock = parentDockWidget();
+        if (dock)
+        {
+            dock->updateGeometry();
+        }
+
+        return;
+    }
 
     if (!widthAnimation || startWidth >= targetWidth)
     {
         if (startWidth > 45)
         {
-            m_expandedWidth = qBound(280, startWidth, 700);
+            m_expandedWidth = qMax(485, startWidth);
         }
 
-        setMinimumWidth(0);
+        setMinimumWidth(485);
         setMaximumWidth(QWIDGETSIZE_MAX);
         setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+        updateContentClipGeometry();
 
         QDockWidget *dock = parentDockWidget();
         if (dock)
         {
-            dock->setMinimumWidth(0);
-            dock->setMaximumWidth(QWIDGETSIZE_MAX);
+            dock->updateGeometry();
         }
+
         return;
     }
 
@@ -14020,6 +19291,7 @@ void SideBarContainer::expand()
     widthAnimation->setStartValue(startWidth);
     widthAnimation->setEndValue(targetWidth);
     widthAnimation->start();
+    updateContentClipGeometry();
 }
 
 namespace
@@ -14841,7 +20113,8 @@ QString htmlTemplate;
                     let base = 'https://player.bilibili.com/player.html?isOutside=true&high_quality=1&danmaku=0';
                     if (/^BV/i.test(vid)) {
                         base += `&bvid=${vid}`;
-                    } else if (/^av/i.test(vid)) {
+
+} else if (/^av/i.test(vid)) {
                         base += `&aid=${vid.slice(2)}`;
                     } else {
                         base += `&aid=${vid}`;
@@ -15476,7 +20749,122 @@ private:
     void updateParallelProgress();
 };
 
+class InteractiveJudgeWidget : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit InteractiveJudgeWidget(CompilerIDE *ide, QWidget *parent = nullptr);
+    ~InteractiveJudgeWidget() override;
+    void setTheme(ThemeMode mode);
+
+private:
+    enum class Phase
+    {
+        Idle,
+        Compiling,
+        Preparing,
+        Starting,
+        Running,
+        Finished
+    };
+
+    struct TestCase
+    {
+        QString inputPath;
+        QString answerPath;
+        QString name;
+    };
+
+    struct CompileJob
+    {
+        QString sourcePath;
+        QString outputPath;
+        QString name;
+    };
+
+    CompilerIDE *m_ide = nullptr;
+    QGroupBox *m_filesGroup = nullptr;
+    QLineEdit *m_solutionPath = nullptr;
+    QLineEdit *m_interactorPath = nullptr;
+    QLineEdit *m_inputPath = nullptr;
+    QLineEdit *m_answerPath = nullptr;
+    QLineEdit *m_arguments = nullptr;
+    QComboBox *m_mode = nullptr;
+    QSpinBox *m_timeLimit = nullptr;
+    QPushButton *m_startButton = nullptr;
+    QPushButton *m_stopButton = nullptr;
+    QPushButton *m_clearButton = nullptr;
+    QProgressBar *m_progress = nullptr;
+    QLabel *m_verdict = nullptr;
+    QLabel *m_details = nullptr;
+    QLabel *m_caseStatus = nullptr;
+    QLabel *m_information = nullptr;
+    QPlainTextEdit *m_transcript = nullptr;
+    QTimer *m_watchdog = nullptr;
+    QTimer *m_flushTimer = nullptr;
+    QProcess *m_compiler = nullptr;
+    QProcess *m_solution = nullptr;
+    QProcess *m_interactor = nullptr;
+    std::unique_ptr<QTemporaryDir> m_tempDirectory;
+    QList<CompileJob> m_compileJobs;
+    QList<TestCase> m_cases;
+    QString m_solutionExe;
+    QString m_interactorExe;
+    QString m_outputLogPath;
+    QString m_solutionError;
+    QString m_interactorError;
+    QString m_pendingTranscript;
+    QByteArray m_toSolution;
+    QByteArray m_toInteractor;
+    QElapsedTimer m_stageClock;
+    QElapsedTimer m_caseClock;
+    Phase m_phase = Phase::Idle;
+    int m_compileIndex = 0;
+    int m_caseIndex = 0;
+    int m_passed = 0;
+    int m_solutionExitCode = -1;
+    int m_interactorExitCode = -1;
+    QProcess::ExitStatus m_solutionExitStatus = QProcess::NormalExit;
+    QProcess::ExitStatus m_interactorExitStatus = QProcess::NormalExit;
+    bool m_solutionStarted = false;
+    bool m_interactorStarted = false;
+    bool m_solutionFinished = false;
+    bool m_interactorFinished = false;
+    bool m_solutionInputClosed = false;
+    bool m_interactorInputClosed = false;
+    qint64 m_solutionBytes = 0;
+    qint64 m_interactorBytes = 0;
+    qint64 m_transcriptBytes = 0;
+    quint64 m_generation = 0;
+    ThemeMode m_theme = ThemeMode::Dark;
+
+    void selectPath(QLineEdit *edit, const QString &title, const QString &filter);
+    void savePreferences() const;
+    bool prepareCases(QString &error);
+    bool prepareExecutable(const QString &source, const QString &name, QString &executable, QString &error);
+    void startChecking();
+    void startNextCompilation();
+    void startNextCase();
+    void configureProcess(QProcess *process, bool contestant, quint64 generation);
+    void handleOutput(bool contestant);
+    void handleErrorOutput(bool contestant);
+    void handleProcessFinished(bool contestant, int exitCode, QProcess::ExitStatus status);
+    void pumpChannels();
+    void completeCase(const QString &verdict, const QString &detail, bool passed);
+    void finishChecking(const QString &verdict, const QString &detail, bool stopped = false);
+    void releaseProcess(QProcess *&process);
+    void releaseProcesses();
+    void appendEvent(const QString &event);
+    void appendTraffic(const QString &sender, const QByteArray &bytes);
+    void flushTranscript();
+    void setResult(const QString &status, const QString &detail);
+    QString errorSummary() const;
+};
+
 // IDE 核心
+
+
 class CompilerIDE : public QMainWindow
 {
     Q_OBJECT
@@ -15487,12 +20875,17 @@ public:
 
     void loadFile(const QString &fileName);
     void newFile();
+    void createNewFile(NewFileDialog::FileType fileType);
     void updateErrorTable(const QStringList &errors, const QStringList &warnings);
     bool isDarkTheme() const
     {
         return darkTheme;
     }
     bool maybeSaveAll();
+    void setUpdateClosePrepared(bool prepared)
+    {
+        m_updateClosePrepared = prepared;
+    }
     void restartIDEWithMessage();
     QString getCompilerPath() const
     {
@@ -15555,7 +20948,7 @@ private:
     bool warningVisible;
     HANDLE hProcess = NULL;
     QTabWidget *tabWidget = nullptr;
-QPlainTextEdit *outputEdit = nullptr;
+    QPlainTextEdit *outputEdit = nullptr;
     QTableWidget *errorTableWidget = nullptr;
     QDockWidget *outputDock = nullptr;
     QDockWidget *errorDock = nullptr;
@@ -15574,6 +20967,8 @@ QPlainTextEdit *outputEdit = nullptr;
     bool autoQuotes;
     bool autoIndent;
     int indentSize;
+    CompletionAcceptMode completionAcceptMode;
+    IndentationMode indentationMode;
     bool codeFolding;
     bool lineNumbers;
     bool darkTheme;
@@ -15631,9 +21026,46 @@ QPlainTextEdit *outputEdit = nullptr;
     QPushButton *replaceAllButton = nullptr;
     QLineEdit *replaceEdit = nullptr;
     bool isHidingPanel;
+    struct ManagedRunTask
+    {
+        DWORD rootProcessId = 0;
+        quint64 creationTime = 0;
+        QString programPath;
+        QString expectedWindowTitle;
+        QDateTime startTime;
+        bool detached = false;
+    };
+
+    struct TaskWindowEnumerationContext
+    {
+        const QSet<DWORD> *processIds = nullptr;
+        QString expectedWindowTitle;
+        QList<HWND> *windows = nullptr;
+    };
+
+    MarkdownEditor *m_currentMarkdownEditor = nullptr;
+    QMap<MarkdownEditor *, QString> m_markdownFilePaths;
+    void loadMarkdownFile(const QString &fileName);
+    bool saveMarkdownFile(MarkdownEditor *editor, const QString &fileName);
+
     QDockWidget *diagnosticsDock = nullptr;
     QWidget *diagnosticsWidget = nullptr;
     QTimer *diagnosticsTimer = nullptr;
+    QTableWidget *taskManagerTable = nullptr;
+    QLabel *taskManagerSummaryLabel = nullptr;
+    QLabel *taskManagerTaskValueLabel = nullptr;
+    QLabel *taskManagerWindowValueLabel = nullptr;
+    QLabel *taskManagerProcessValueLabel = nullptr;
+    QLabel *taskManagerMemoryValueLabel = nullptr;
+    QLabel *taskManagerLiveLabel = nullptr;
+    QLabel *taskManagerEmptyTitleLabel = nullptr;
+    QLabel *taskManagerEmptyDescriptionLabel = nullptr;
+    QLineEdit *taskManagerSearchEdit = nullptr;
+    QStackedWidget *taskManagerContentStack = nullptr;
+    QPushButton *taskManagerRefreshButton = nullptr;
+    QPushButton *taskManagerEndButton = nullptr;
+    QPushButton *taskManagerDetailsButton = nullptr;
+    QMap<DWORD, ManagedRunTask> managedRunTasks;
     QLabel *cpuUsageLabel = nullptr;
     QLabel *memoryUsageLabel = nullptr;
     QLabel *systemUptimeLabel = nullptr;
@@ -15683,6 +21115,7 @@ QPlainTextEdit *outputEdit = nullptr;
     int currentDebugLine;
     QDockWidget *checkerDock = nullptr;
     CheckerWidget *checkerWidget = nullptr;
+    InteractiveJudgeWidget *interactiveJudgeWidget = nullptr;
     QAction *checkerAct = nullptr;
     QAction *debugRunToCursorAct = nullptr;
     QStringList accumulatedErrors;
@@ -15742,6 +21175,7 @@ QPlainTextEdit *outputEdit = nullptr;
     QAction *terminalShowAct = nullptr;
     QAction *snippetShowAct = nullptr;
     bool isRestarting = false;
+    bool m_updateClosePrepared = false;
     QValueAxis *cpuAxisX = nullptr;
     QValueAxis *cpuAxisY = nullptr;
     QValueAxis *memoryAxisX = nullptr;
@@ -15766,6 +21200,7 @@ QPlainTextEdit *outputEdit = nullptr;
     QSpinBox *timeLimitSpinBox = nullptr;
     QPushButton *addTestBtn = nullptr;
     QPushButton *runAllTestsBtn = nullptr;
+    QPushButton *importTestsFromZipBtn = nullptr;
     QLabel *overallResultLabel = nullptr;
     QList<QWidget *> testCaseWidgets;
     bool suppressSampleTesterAutoScroll = false;
@@ -15784,6 +21219,7 @@ QPlainTextEdit *outputEdit = nullptr;
     QPushButton *competitiveCompanionOpenProblemButton = nullptr;
     QString competitiveCompanionProblemUrl;
     QSet<QString> competitiveCompanionSessionFiles;
+    QMap<QString, QByteArray> competitiveCompanionPristineHashes;
     QProcess *testProcess = nullptr;
     QTimer *testTimer = nullptr;
     QPointer<QProcess> testWarmupProcess;
@@ -15804,11 +21240,15 @@ QPlainTextEdit *outputEdit = nullptr;
     QAction *luoguAct = nullptr;
     QFont editorFont;
     SideBarContainer *rightSidebar = nullptr;
+    CalculatorWidget *calculatorWidget = nullptr;
     QDockWidget *aiDock = nullptr;
     QAction *aiAct = nullptr;
     QPointer<QProcess> m_tempCompileProcess;
     bool m_isTempCompiling = false;
     QStringList sidebarFeatureNames;
+    QStringList m_visibleSidebarFeatureNames;
+    QString m_currentBuildExecutable;
+    QSet<QString> m_concurrentBuildExecutables;
     QAction *openSourceNoticeAct = nullptr;
 
     class LSPClient *m_lspClient = nullptr;
@@ -15819,18 +21259,22 @@ QPlainTextEdit *outputEdit = nullptr;
     QTimer *m_lspDebounceTimer = nullptr;
     QPointer<CodeEditor> m_pendingLSPEditor;
     QSet<QString> m_lspFlagDirs;
+    QMap<QString, QPair<QByteArray, QByteArray>> m_lspOwnedFiles;
+    QString lastSuccessfulExecutable;
+    QString lastSuccessfulSource;
 
     void initLSP();
     void sendOpenToLSP(CodeEditor *editor, const QString &filePath);
     void sendChangeToLSP(CodeEditor *editor);
     void sendCloseToLSP(CodeEditor *editor);
     void ensureCompileFlags(const QString &dirPath, bool isEasyX);
+    void removeOwnedCompileFlags(const QString &dirPath);
     QStringList detectMinGWIncludePaths(const QString &compilerPath);
     bool isCompilerValid(const QString &path);
     QString getTempFilePathForNewEditor(CodeEditor *editor);
     QString normalizedWatchPath(const QString &filePath) const;
     int findEditorByFilePath(const QString &filePath) const;
-    void watchOpenedFile(const QString &filePath);
+    void watchOpenedFile(const QString &filePath, const QByteArray &knownHash = QByteArray());
     void unwatchFileIfUnused(const QString &filePath, CodeEditor *excludedEditor = nullptr);
     bool reloadEditorFromDisk(CodeEditor *editor, const QString &filePath);
 
@@ -15841,6 +21285,7 @@ QPlainTextEdit *outputEdit = nullptr;
     void warmupAndRunTest();
     void createCompetitionDock();
     void updateTimerDisplay();
+
     void applyCompetitionModeSettings();
     void restoreNormalModeSettings();
     bool isCompetitionMode() const
@@ -15865,6 +21310,7 @@ QPlainTextEdit *outputEdit = nullptr;
     void setCurrentFile(const QString &fileName);
     QString strippedName(const QString &fullFileName);
     void runExecutable(const QString &programPath, bool isAfterCompile = false);
+    void applySidebarFeatureVisibility();
     CodeEditor *currentEditor() const;
     CodeEditor *editorAt(int index) const;
     int findEditor(const QString &fileName) const;
@@ -15873,6 +21319,23 @@ QPlainTextEdit *outputEdit = nullptr;
     void showFloatingTimeWarning(const QString &message, int duration);
     QPair<QString, QString> extractLineAndColumn(const QString &errorLine);
     void createDiagnosticsDock();
+    void applyTaskManagerTheme();
+    void applyTaskManagerFilter();
+    void updateTaskManager();
+    void registerManagedRunTask(DWORD processId, const QString &programPath, const QString &expectedWindowTitle, bool detached);
+    void terminateManagedRunTask(DWORD processId);
+    void showSelectedTaskDetails();
+    void endSelectedTask();
+    DWORD selectedManagedTaskId() const;
+    bool isManagedRunTaskAlive(const ManagedRunTask &task) const;
+    quint64 getProcessCreationTimeValue(DWORD processId) const;
+    QSet<DWORD> collectManagedProcessTree(DWORD rootProcessId) const;
+    QList<HWND> collectManagedTaskWindows(const ManagedRunTask &task) const;
+    QString getWindowTitleText(HWND windowHandle) const;
+    QString getProcessImagePath(DWORD processId) const;
+    quint64 getProcessMemoryBytes(DWORD processId) const;
+    int getManagedProcessThreadCount(const QSet<DWORD> &processIds) const;
+    static BOOL CALLBACK enumManagedTaskWindowsProc(HWND windowHandle, LPARAM parameter);
     void updateSystemInfo();
     double getCPUUsage();
     double getMemoryUsage();
@@ -16140,7 +21603,7 @@ private slots:
     void updateStatusBar();
     void changeCppStandard(int index);
     void showSettings();
-    void applySettings(const QString &compilerPath, bool autoBrackets, bool autoQuotes, bool autoIndent, int indentSize, bool lineNumbers, ThemeMode themeMode, bool codeCompletion, const QFont &editorFont);
+    void applySettings(const QString &compilerPath, bool autoBrackets, bool autoQuotes, bool autoIndent, int indentSize, bool lineNumbers, ThemeMode themeMode, bool codeCompletion, CompletionAcceptMode completionAcceptMode, IndentationMode indentationMode, const QFont &editorFont);
     void toggleComment();
     void runProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void readRunOutput();
@@ -16234,6 +21697,7 @@ private slots:
     void showTemplateSettings();
     void showSampleTester();
     void addTestCase();
+    void importTestsFromZip();
     void removeTestCase();
     void runSingleTest();
     void runAllTests();
@@ -16248,7 +21712,8 @@ private slots:
 CompilerIDE::CompilerIDE()
     : compileProcess(nullptr), runProcess(nullptr),
       cppStandard("c++17"), autoBrackets(true), autoQuotes(true),
-      autoIndent(true), indentSize(4), lineNumbers(true),
+      autoIndent(true), indentSize(4), completionAcceptMode(CompletionAcceptMode::Tab),
+      indentationMode(IndentationMode::Spaces), lineNumbers(true),
       darkTheme(true), themeMode(ThemeMode::Dark), debugger(nullptr), codeCompleter(nullptr),
       terminal(nullptr), snippetManager(nullptr), diagnosticsTimer(nullptr), maxHistoryPoints(60), initialUptime(0), isNewCompilation(false), errorTableWidget(nullptr), isCheckingForUpdates(false), previewUpdates(false), isDebugging(false),
       currentDebugState(DebugState_Idle),
@@ -16346,6 +21811,26 @@ CompilerIDE::CompilerIDE()
     terminalDock = terminal;
     terminalDock->setVisible(false);
     addDockWidget(Qt::BottomDockWidgetArea, terminalDock);
+
+    if (outputDock)
+    {
+        tabifyDockWidget(outputDock, terminalDock);
+
+        if (debugDock)
+        {
+            tabifyDockWidget(outputDock, debugDock);
+        }
+
+        setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::South);
+        if (errorDock)
+        {
+            errorDock->raise();
+        }
+        else
+        {
+            outputDock->raise();
+        }
+    }
 
     snippetDock = snippetManager;
     snippetDock->setVisible(false);
@@ -16647,6 +22132,12 @@ aiDock->setWidget(aiWidget);
 
     loadTemplateSettings();
 
+    calculatorWidget = new CalculatorWidget(this);
+    calculatorWidget->setTheme(themeMode);
+
+    interactiveJudgeWidget = new InteractiveJudgeWidget(this);
+    interactiveJudgeWidget->setTheme(themeMode);
+
     rightSidebar = new SideBarContainer(this);
     rightSidebar->setDarkTheme(darkTheme);
     rightSidebar->hide();
@@ -16656,7 +22147,7 @@ aiDock->setWidget(aiWidget);
     sidebarDock->setTitleBarWidget(new QWidget());
     sidebarDock->setWidget(rightSidebar);
     addDockWidget(Qt::LeftDockWidgetArea, sidebarDock);
-    resizeDocks({sidebarDock}, {400}, Qt::Horizontal);
+    resizeDocks({sidebarDock}, {485}, Qt::Horizontal);
 
     struct SidebarItem
     {
@@ -16669,12 +22160,14 @@ aiDock->setWidget(aiWidget);
             {tr("文件浏览器"), fileBrowserDock->widget()},
             {tr("符号浏览器"), symbolBrowserDock->widget()},
             {tr("大纲视图"), outlineDock->widget()},
-            {tr("诊断工具"), diagnosticsDock->widget()},
+            {tr("任务管理器"), diagnosticsDock->widget()},
             {tr("代码片段"), snippetManager},
             {tr("对拍器"), checkerWidget},
             {tr("AI 助手"), aiDock->widget()},
             {tr("洛谷题目爬取器"), luoguDock->widget()},
-            {tr("数据评测器"), sampleTesterWidget}};
+            {tr("数据评测器"), sampleTesterWidget},
+            {tr("交互题检查"), interactiveJudgeWidget},
+            {tr("计算器"), calculatorWidget}};
 
     sidebarFeatureNames.clear();
     for (const auto &item : items)
@@ -16688,10 +22181,22 @@ aiDock->setWidget(aiWidget);
         sidebarFeatureNames.append(item.name);
     }
 
-    if (!sidebarFeatureNames.isEmpty())
+    QSettings sidebarSettings("CompilerIDE", "Compiler IDE 2.8.6");
+    const QStringList savedSidebarFeatures = sidebarSettings.value(
+        "sidebarVisibleFeatures", sidebarFeatureNames).toStringList();
+    m_visibleSidebarFeatureNames.clear();
+    for (const QString &feature : sidebarFeatureNames)
     {
-        rightSidebar->switchToFeature(sidebarFeatureNames.first());
+        if (savedSidebarFeatures.contains(feature) && m_visibleSidebarFeatureNames.size() < 12)
+        {
+            m_visibleSidebarFeatureNames.append(feature);
+        }
     }
+    if (m_visibleSidebarFeatureNames.isEmpty() && !sidebarFeatureNames.isEmpty())
+    {
+        m_visibleSidebarFeatureNames.append(sidebarFeatureNames.first());
+    }
+    applySidebarFeatureVisibility();
 
     connect(rightSidebar, &SideBarContainer::featureDisabledClicked,
             this, [this](const QString &name)
@@ -16724,6 +22229,18 @@ CompilerIDE::~CompilerIDE()
         runProcess->waitForFinished();
         delete runProcess;
     }
+
+    const QList<DWORD> managedTaskIds = managedRunTasks.keys();
+    for (DWORD processId : managedTaskIds)
+    {
+        terminateManagedRunTask(processId);
+    }
+
+    for (const QString &executable : m_concurrentBuildExecutables)
+    {
+        QFile::remove(executable);
+    }
+
     if (hRunningProcess != NULL)
     {
         TerminateProcess(hRunningProcess, 0);
@@ -16739,24 +22256,12 @@ CompilerIDE::~CompilerIDE()
         m_lspClient = nullptr;
     }
 
-    for (const QString &dir : m_lspFlagDirs)
+    const QSet<QString> cleanupDirectories = m_lspFlagDirs;
+    for (const QString &dir : cleanupDirectories)
     {
-        QDir d(dir);
-        QString flagsFile = d.filePath("compile_flags.txt");
-        QString metaFile = d.filePath(".compileride_lsp_flags.meta");
-        if (QFile::exists(flagsFile))
-        {
-            if (!QFile::remove(flagsFile))
-            {
-                QThread::msleep(100);
-                QFile::remove(flagsFile);
-            }
-        }
-        if (QFile::exists(metaFile))
-        {
-            QFile::remove(metaFile);
-        }
+        removeOwnedCompileFlags(dir);
     }
+    m_lspOwnedFiles.clear();
     m_lspFlagDirs.clear();
 
     QApplication::processEvents(QEventLoop::AllEvents, 100);
@@ -16841,7 +22346,8 @@ void CompilerIDE::setTheme(ThemeMode mode)
         if (debugOutput)
         {
             debugOutput->setStyleSheet(
-                "QTextBrowser {"
+
+"QTextBrowser {"
                 "    background-color: #1E1E1E;"
                 "    color: #D4D4D4;"
                 "    border: 1px solid #3C3C3C;"
@@ -17283,6 +22789,13 @@ void CompilerIDE::setTheme(ThemeMode mode)
         if (editor)
         {
             editor->setThemeMode(mode);
+            continue;
+        }
+
+        MarkdownEditor *mdEditor = qobject_cast<MarkdownEditor *>(tabWidget->widget(i));
+        if (mdEditor)
+        {
+            mdEditor->setThemeMode(static_cast<int>(mode));
         }
     }
 
@@ -17293,13 +22806,22 @@ void CompilerIDE::setTheme(ThemeMode mode)
     {
         rightSidebar->setDarkTheme(darkTheme);
     }
+    if (calculatorWidget)
+    {
+        calculatorWidget->setTheme(mode);
+    }
 
     updateCompetitiveCompanionPanelStyle(darkTheme);
     updateSampleTesterStyle(darkTheme);
+    applyTaskManagerTheme();
 
     if (checkerWidget)
     {
         checkerWidget->setTheme(darkTheme);
+    }
+    if (interactiveJudgeWidget)
+    {
+        interactiveJudgeWidget->setTheme(mode);
     }
 
     if (outputEdit)
@@ -17715,7 +23237,7 @@ void CompilerIDE::closeEvent(QCloseEvent *event)
         return;
     }
 
-    if (!maybeSaveAll())
+    if (!m_updateClosePrepared && !maybeSaveAll())
     {
         event->ignore();
         return;
@@ -17760,125 +23282,1090 @@ void CompilerIDE::closeEvent(QCloseEvent *event)
 
 void CompilerIDE::createDiagnosticsDock()
 {
-    diagnosticsDock = new QDockWidget(tr("诊断工具（可能有较小误差）"), this);
+    diagnosticsDock = new QDockWidget(tr("任务管理器"), this);
     diagnosticsDock->setAllowedAreas(Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
     diagnosticsDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable);
-
-    QScrollArea *scrollArea = new QScrollArea;
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    scrollArea->setFrameShape(QFrame::NoFrame);
+    diagnosticsDock->setMinimumWidth(360);
 
     diagnosticsWidget = new QWidget;
+    diagnosticsWidget->setObjectName("TaskManagerRoot");
+
     QVBoxLayout *mainLayout = new QVBoxLayout(diagnosticsWidget);
+    mainLayout->setContentsMargins(14, 14, 14, 14);
+    mainLayout->setSpacing(12);
 
-    QGroupBox *systemGroup = new QGroupBox(tr("系统信息"));
-    QFormLayout *systemLayout = new QFormLayout(systemGroup);
+    QHBoxLayout *titleLayout = new QHBoxLayout;
+    titleLayout->setContentsMargins(2, 0, 2, 0);
+    titleLayout->setSpacing(10);
 
-    cpuUsageLabel = new QLabel("0%");
-    memoryUsageLabel = new QLabel("0%");
-    systemUptimeLabel = nullptr;
-    processMemoryLabel = new QLabel("0 MB");
-    processThreadsLabel = new QLabel("0");
+    QVBoxLayout *titleTextLayout = new QVBoxLayout;
+    titleTextLayout->setContentsMargins(0, 0, 0, 0);
+    titleTextLayout->setSpacing(2);
 
-    systemLayout->addRow(tr("CPU使用率:"), cpuUsageLabel);
-    systemLayout->addRow(tr("内存使用率:"), memoryUsageLabel);
-    systemLayout->addRow(tr("进程内存:"), processMemoryLabel);
-    systemLayout->addRow(tr("进程线程数:"), processThreadsLabel);
+    QLabel *titleLabel = new QLabel(tr("进程"), diagnosticsWidget);
+    titleLabel->setObjectName("TaskManagerTitle");
 
-    QGroupBox *chartsGroup = new QGroupBox(tr("性能图表"));
-    QVBoxLayout *chartsLayout = new QVBoxLayout(chartsGroup);
+    taskManagerSummaryLabel = new QLabel(tr("仅显示由 Compiler IDE 启动的任务"), diagnosticsWidget);
+    taskManagerSummaryLabel->setObjectName("TaskManagerSubtitle");
+    taskManagerSummaryLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
-    cpuChart = new QChart();
-    cpuChart->setTitle(tr("CPU使用率"));
-    cpuChart->setAnimationOptions(QChart::NoAnimation);
+    titleTextLayout->addWidget(titleLabel);
+    titleTextLayout->addWidget(taskManagerSummaryLabel);
 
-    cpuSeries = new QLineSeries();
-    cpuSeries->setName(tr("CPU使用率"));
+    taskManagerLiveLabel = new QLabel(tr("●  实时"), diagnosticsWidget);
+    taskManagerLiveLabel->setObjectName("TaskManagerLiveBadge");
+    taskManagerLiveLabel->setAlignment(Qt::AlignCenter);
+    taskManagerLiveLabel->setToolTip(tr(""));
 
-    cpuChart->addSeries(cpuSeries);
+    titleLayout->addLayout(titleTextLayout, 1);
+    titleLayout->addWidget(taskManagerLiveLabel, 0, Qt::AlignTop);
 
-    cpuAxisY = new QValueAxis();
-    cpuAxisY->setRange(0, 100);
-    cpuAxisY->setTitleText(tr("使用率 (%)"));
-    cpuChart->addAxis(cpuAxisY, Qt::AlignLeft);
-    cpuSeries->attachAxis(cpuAxisY);
+    QGridLayout *metricsLayout = new QGridLayout;
+    metricsLayout->setContentsMargins(0, 0, 0, 0);
+    metricsLayout->setHorizontalSpacing(8);
+    metricsLayout->setVerticalSpacing(8);
 
-    cpuAxisX = new QValueAxis();
-    cpuAxisX->setRange(0, maxHistoryPoints);
-    cpuAxisX->setTitleText(tr("时间"));
-    cpuAxisX->setTickCount(6);
-    cpuAxisX->setLabelFormat("%d");
-    cpuChart->addAxis(cpuAxisX, Qt::AlignBottom);
-    cpuSeries->attachAxis(cpuAxisX);
+    auto createMetricCard = [this](const QString &caption, QLabel **valueLabel) -> QFrame *
+    {
+        QFrame *card = new QFrame(diagnosticsWidget);
+        card->setObjectName("TaskManagerMetricCard");
+        card->setMinimumHeight(72);
 
-    cpuChartView = new QChartView(cpuChart);
-    cpuChartView->setRenderHint(QPainter::Antialiasing);
-    cpuChartView->setMinimumHeight(200);
+        QVBoxLayout *layout = new QVBoxLayout(card);
+        layout->setContentsMargins(12, 10, 12, 10);
+        layout->setSpacing(2);
 
-    memoryChart = new QChart();
-    memoryChart->setTitle(tr("内存使用率"));
-    memoryChart->setAnimationOptions(QChart::NoAnimation);
+        QLabel *captionLabel = new QLabel(caption, card);
+        captionLabel->setObjectName("TaskManagerMetricCaption");
 
-    memorySeries = new QLineSeries();
-    memorySeries->setName(tr("内存使用率"));
+        QLabel *value = new QLabel("0", card);
+        value->setObjectName("TaskManagerMetricValue");
+        value->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
-    memoryChart->addSeries(memorySeries);
+        layout->addWidget(captionLabel);
+        layout->addWidget(value);
+        layout->addStretch();
 
-    memoryAxisY = new QValueAxis();
-    memoryAxisY->setRange(0, 100);
-    memoryAxisY->setTitleText(tr("使用率 (%)"));
-    memoryChart->addAxis(memoryAxisY, Qt::AlignLeft);
-    memorySeries->attachAxis(memoryAxisY);
+        *valueLabel = value;
+        return card;
+    };
 
-    memoryAxisX = new QValueAxis();
-    memoryAxisX->setRange(0, maxHistoryPoints);
-    memoryAxisX->setTitleText(tr("时间"));
-    memoryAxisX->setTickCount(6);
-    memoryAxisX->setLabelFormat("%d");
-    memoryChart->addAxis(memoryAxisX, Qt::AlignBottom);
-    memorySeries->attachAxis(memoryAxisX);
+    metricsLayout->addWidget(createMetricCard(tr("应用"), &taskManagerTaskValueLabel), 0, 0);
+    metricsLayout->addWidget(createMetricCard(tr("活动窗口"), &taskManagerWindowValueLabel), 0, 1);
+    metricsLayout->addWidget(createMetricCard(tr("进程"), &taskManagerProcessValueLabel), 1, 0);
+    metricsLayout->addWidget(createMetricCard(tr("内存"), &taskManagerMemoryValueLabel), 1, 1);
+    metricsLayout->setColumnStretch(0, 1);
+    metricsLayout->setColumnStretch(1, 1);
 
-    memoryChartView = new QChartView(memoryChart);
-    memoryChartView->setRenderHint(QPainter::Antialiasing);
-    memoryChartView->setMinimumHeight(200);
+    QHBoxLayout *searchLayout = new QHBoxLayout;
+    searchLayout->setContentsMargins(0, 0, 0, 0);
+    searchLayout->setSpacing(8);
 
-    chartsLayout->addWidget(cpuChartView);
-    chartsLayout->addWidget(memoryChartView);
+    taskManagerSearchEdit = new QLineEdit(diagnosticsWidget);
+    taskManagerSearchEdit->setObjectName("TaskManagerSearchEdit");
+    taskManagerSearchEdit->setPlaceholderText(tr("搜索名称、PID 或窗口标题"));
+    taskManagerSearchEdit->setClearButtonEnabled(true);
 
-    QHBoxLayout *controlLayout = new QHBoxLayout();
-    QPushButton *refreshButton = new QPushButton(tr("立即刷新"));
-    QPushButton *clearButton = new QPushButton(tr("清除图表"));
+    taskManagerRefreshButton = new QPushButton(tr("刷新"), diagnosticsWidget);
+    taskManagerRefreshButton->setObjectName("TaskManagerSecondaryButton");
+    QPixmap refreshPixmap(18, 18);
+    refreshPixmap.fill(Qt::transparent);
+    QPainter refreshPainter(&refreshPixmap);
+    refreshPainter.setRenderHint(QPainter::Antialiasing, true);
+    QPen refreshPen(QColor("#5B9BFF"), 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    refreshPainter.setPen(refreshPen);
+    QRectF refreshRect(3.5, 3.5, 11, 11);
+    refreshPainter.drawArc(refreshRect, 45 * 16, 250 * 16);
+    QPolygonF refreshArrow;
+    refreshArrow << QPointF(13.8, 3.8) << QPointF(15.5, 8.2) << QPointF(11.1, 7.2);
+    refreshPainter.setBrush(QColor("#5B9BFF"));
+    refreshPainter.setPen(Qt::NoPen);
+    refreshPainter.drawPolygon(refreshArrow);
+    refreshPainter.end();
+    taskManagerRefreshButton->setIcon(QIcon(refreshPixmap));
+    taskManagerRefreshButton->setToolTip(tr("立即刷新任务列表"));
 
-    controlLayout->addWidget(refreshButton);
-    controlLayout->addWidget(clearButton);
-    controlLayout->addStretch();
+    searchLayout->addWidget(taskManagerSearchEdit, 1);
+    searchLayout->addWidget(taskManagerRefreshButton);
 
-    mainLayout->addWidget(systemGroup);
-    mainLayout->addWidget(chartsGroup);
-    mainLayout->addLayout(controlLayout);
+    taskManagerContentStack = new QStackedWidget(diagnosticsWidget);
+    taskManagerContentStack->setObjectName("TaskManagerContentStack");
 
-    scrollArea->setWidget(diagnosticsWidget);
-    diagnosticsDock->setWidget(scrollArea);
+    taskManagerTable = new QTableWidget(diagnosticsWidget);
+    taskManagerTable->setObjectName("TaskManagerTable");
+    taskManagerTable->setColumnCount(7);
+    taskManagerTable->setHorizontalHeaderLabels(QStringList()
+                                                << tr("名称")
+                                                << tr("PID")
+                                                << tr("窗口")
+                                                << tr("进程")
+                                                << tr("内存")
+                                                << tr("启动时间")
+                                                << tr("状态"));
+    taskManagerTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    taskManagerTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    taskManagerTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    taskManagerTable->setAlternatingRowColors(false);
+    taskManagerTable->setSortingEnabled(false);
+    taskManagerTable->setWordWrap(false);
+    taskManagerTable->setShowGrid(false);
+    taskManagerTable->setFocusPolicy(Qt::StrongFocus);
+    taskManagerTable->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    taskManagerTable->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    taskManagerTable->setCornerButtonEnabled(false);
+    taskManagerTable->verticalHeader()->setVisible(false);
+    taskManagerTable->verticalHeader()->setDefaultSectionSize(38);
+    taskManagerTable->horizontalHeader()->setMinimumSectionSize(58);
+    taskManagerTable->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    taskManagerTable->horizontalHeader()->setStretchLastSection(false);
+    taskManagerTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    taskManagerTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    taskManagerTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    taskManagerTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    taskManagerTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    taskManagerTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    taskManagerTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+
+    QWidget *emptyPage = new QWidget(diagnosticsWidget);
+    emptyPage->setObjectName("TaskManagerEmptyPage");
+    QVBoxLayout *emptyLayout = new QVBoxLayout(emptyPage);
+    emptyLayout->setContentsMargins(24, 24, 24, 24);
+    emptyLayout->setSpacing(8);
+    emptyLayout->addStretch();
+
+    QLabel *emptyIconLabel = new QLabel(emptyPage);
+    emptyIconLabel->setObjectName("TaskManagerEmptyIcon");
+    emptyIconLabel->setAlignment(Qt::AlignCenter);
+    emptyIconLabel->setPixmap(style()->standardIcon(QStyle::SP_ComputerIcon).pixmap(42, 42));
+
+    taskManagerEmptyTitleLabel = new QLabel(tr("没有正在运行的任务"), emptyPage);
+    taskManagerEmptyTitleLabel->setObjectName("TaskManagerEmptyTitle");
+    taskManagerEmptyTitleLabel->setAlignment(Qt::AlignCenter);
+
+    taskManagerEmptyDescriptionLabel = new QLabel(tr(""), emptyPage);
+    taskManagerEmptyDescriptionLabel->setObjectName("TaskManagerEmptyDescription");
+    taskManagerEmptyDescriptionLabel->setAlignment(Qt::AlignCenter);
+    taskManagerEmptyDescriptionLabel->setWordWrap(true);
+
+    emptyLayout->addWidget(emptyIconLabel);
+    emptyLayout->addWidget(taskManagerEmptyTitleLabel);
+    emptyLayout->addWidget(taskManagerEmptyDescriptionLabel);
+    emptyLayout->addStretch();
+
+    taskManagerContentStack->addWidget(taskManagerTable);
+    taskManagerContentStack->addWidget(emptyPage);
+
+    QFrame *actionBar = new QFrame(diagnosticsWidget);
+    actionBar->setObjectName("TaskManagerActionBar");
+    QHBoxLayout *controlLayout = new QHBoxLayout(actionBar);
+    controlLayout->setContentsMargins(10, 8, 10, 8);
+    controlLayout->setSpacing(8);
+
+    QLabel *selectionHintLabel = new QLabel(tr("双击任务可查看详细信息"), actionBar);
+    selectionHintLabel->setObjectName("TaskManagerActionHint");
+
+    taskManagerDetailsButton = new QPushButton(tr("详细信息"), actionBar);
+    taskManagerDetailsButton->setObjectName("TaskManagerSecondaryButton");
+
+    taskManagerEndButton = new QPushButton(tr("结束任务"), actionBar);
+    taskManagerEndButton->setObjectName("TaskManagerDangerButton");
+
+    taskManagerDetailsButton->setEnabled(false);
+    taskManagerEndButton->setEnabled(false);
+
+    controlLayout->addWidget(selectionHintLabel, 1);
+    controlLayout->addWidget(taskManagerDetailsButton);
+    controlLayout->addWidget(taskManagerEndButton);
+
+    mainLayout->addLayout(titleLayout);
+    mainLayout->addLayout(metricsLayout);
+    mainLayout->addLayout(searchLayout);
+    mainLayout->addWidget(taskManagerContentStack, 1);
+    mainLayout->addWidget(actionBar);
+
+    diagnosticsDock->setWidget(diagnosticsWidget);
     diagnosticsDock->setVisible(false);
     addDockWidget(Qt::RightDockWidgetArea, diagnosticsDock);
 
-    connect(refreshButton, &QPushButton::clicked, this, &CompilerIDE::updateSystemInfo);
-    connect(clearButton, &QPushButton::clicked, this, [this]()
+    connect(taskManagerRefreshButton, &QPushButton::clicked, this, &CompilerIDE::updateTaskManager);
+    connect(taskManagerDetailsButton, &QPushButton::clicked, this, &CompilerIDE::showSelectedTaskDetails);
+    connect(taskManagerEndButton, &QPushButton::clicked, this, &CompilerIDE::endSelectedTask);
+    connect(taskManagerSearchEdit, &QLineEdit::textChanged, this,
+            [this](const QString &)
             {
-                cpuHistory.clear();
-                memoryHistory.clear();
-                cpuSeries->clear();
-                memorySeries->clear();
+                applyTaskManagerFilter();
+            });
+    connect(taskManagerTable, &QTableWidget::itemDoubleClicked, this,
+            [this](QTableWidgetItem *)
+            {
+                showSelectedTaskDetails();
+            });
+    connect(taskManagerTable, &QTableWidget::itemSelectionChanged, this,
+            [this]()
+            {
+                const bool hasSelection = selectedManagedTaskId() != 0;
+                taskManagerDetailsButton->setEnabled(hasSelection);
+                taskManagerEndButton->setEnabled(hasSelection);
             });
 
     diagnosticsTimer = new QTimer(this);
-    connect(diagnosticsTimer, &QTimer::timeout, this, &CompilerIDE::updateSystemInfo);
-    diagnosticsTimer->start(2000);
+    diagnosticsTimer->setInterval(500);
+    connect(diagnosticsTimer, &QTimer::timeout, this, &CompilerIDE::updateTaskManager);
+    diagnosticsTimer->start();
 
-    initialUptime = QDateTime::currentSecsSinceEpoch();
-    updateSystemInfo();
+    applyTaskManagerTheme();
+    updateTaskManager();
+}
+
+void CompilerIDE::applyTaskManagerTheme()
+{
+    if (!diagnosticsWidget)
+    {
+        return;
+    }
+
+    const bool dark = themeMode == ThemeMode::Dark;
+    const bool eyeCare = themeMode == ThemeMode::EyeCare;
+
+    const QString pageBackground = dark ? "#202020" : eyeCare ? "#F7F0DE" : "#F7F7F7";
+    const QString cardBackground = dark ? "#2B2B2B" : eyeCare ? "#FFF8E8" : "#FFFFFF";
+    const QString tableBackground = dark ? "#242424" : eyeCare ? "#FFF9EA" : "#FFFFFF";
+    const QString hoverBackground = dark ? "#323232" : eyeCare ? "#F2E7CA" : "#F3F3F3";
+    const QString selectedBackground = dark ? "#3A3A3A" : eyeCare ? "#E6D9B5" : "#E8F2FB";
+    const QString primaryText = dark ? "#F2F2F2" : eyeCare ? "#3B3A32" : "#1F1F1F";
+    const QString secondaryText = dark ? "#AFAFAF" : eyeCare ? "#716A59" : "#6B6B6B";
+    const QString borderColor = dark ? "#3D3D3D" : eyeCare ? "#D4C59D" : "#E1E1E1";
+    const QString inputBackground = dark ? "#303030" : eyeCare ? "#FFFDF4" : "#FFFFFF";
+    const QString inputFocusBorder = dark ? "#60A5FA" : eyeCare ? "#6F8F5B" : "#0067C0";
+    const QString selectionText = primaryText;
+    const QString buttonHover = dark ? "#3B3B3B" : eyeCare ? "#EFE4C6" : "#EEEEEE";
+    const QString buttonPressed = dark ? "#454545" : eyeCare ? "#E4D7B3" : "#E4E4E4";
+    const QString dangerBackground = dark ? "#C42B1C" : "#C42B1C";
+    const QString dangerHover = dark ? "#D63B2C" : "#B3261E";
+    const QString dangerPressed = dark ? "#A52317" : "#9F1F18";
+    const QString liveBackground = dark ? "#163C26" : eyeCare ? "#E3EED9" : "#E7F4EA";
+    const QString liveText = dark ? "#72D792" : eyeCare ? "#4D6F3F" : "#137333";
+
+    diagnosticsWidget->setStyleSheet(QString(
+        "QWidget#TaskManagerRoot { background: %1; }"
+        "QLabel#TaskManagerTitle { color: %2; font-size: 18px; font-weight: 600; background: transparent; }"
+        "QLabel#TaskManagerSubtitle { color: %3; font-size: 11px; background: transparent; }"
+        "QLabel#TaskManagerLiveBadge { background: %4; color: %5; border-radius: 10px; padding: 3px 9px; font-size: 10px; font-weight: 600; }"
+        "QFrame#TaskManagerMetricCard { background: %6; border: 1px solid %7; border-radius: 9px; }"
+        "QLabel#TaskManagerMetricCaption { color: %3; font-size: 10px; background: transparent; }"
+        "QLabel#TaskManagerMetricValue { color: %2; font-size: 17px; font-weight: 600; background: transparent; }"
+        "QLineEdit#TaskManagerSearchEdit { background: %8; color: %2; border: 1px solid %7; border-radius: 7px; padding: 7px 10px; min-height: 20px; selection-background-color: %9; }"
+        "QLineEdit#TaskManagerSearchEdit:focus { border: 1px solid %10; }"
+        "QTableWidget#TaskManagerTable { background: %11; color: %2; border: 1px solid %7; border-radius: 8px; outline: none; gridline-color: transparent; }"
+        "QTableWidget#TaskManagerTable::item { border: none; border-bottom: 1px solid %7; padding: 6px 8px; }"
+        "QTableWidget#TaskManagerTable::item:hover { background: %12; }"
+        "QTableWidget#TaskManagerTable::item:selected { background: %13; color: %14; }"
+        "QHeaderView::section { background: %6; color: %3; border: none; border-bottom: 1px solid %7; padding: 8px 8px; font-size: 10px; font-weight: 600; }"
+        "QHeaderView { background: %6; }"
+        "QScrollBar:vertical { background: transparent; width: 10px; margin: 3px; }"
+        "QScrollBar::handle:vertical { background: %7; border-radius: 4px; min-height: 28px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        "QScrollBar:horizontal { background: transparent; height: 10px; margin: 3px; }"
+        "QScrollBar::handle:horizontal { background: %7; border-radius: 4px; min-width: 28px; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }"
+        "QFrame#TaskManagerActionBar { background: %6; border: 1px solid %7; border-radius: 8px; }"
+        "QLabel#TaskManagerActionHint { color: %3; font-size: 10px; background: transparent; }"
+        "QPushButton#TaskManagerSecondaryButton { background: transparent; color: %2; border: 1px solid %7; border-radius: 6px; padding: 6px 11px; min-height: 20px; }"
+        "QPushButton#TaskManagerSecondaryButton:hover { background: %15; }"
+        "QPushButton#TaskManagerSecondaryButton:pressed { background: %16; }"
+        "QPushButton#TaskManagerSecondaryButton:disabled { color: %3; background: transparent; }"
+        "QPushButton#TaskManagerDangerButton { background: %17; color: white; border: 1px solid %17; border-radius: 6px; padding: 6px 12px; min-height: 20px; font-weight: 600; }"
+        "QPushButton#TaskManagerDangerButton:hover { background: %18; border-color: %18; }"
+        "QPushButton#TaskManagerDangerButton:pressed { background: %19; border-color: %19; }"
+        "QPushButton#TaskManagerDangerButton:disabled { background: transparent; color: %3; border-color: %7; }"
+        "QWidget#TaskManagerEmptyPage { background: %11; border: 1px solid %7; border-radius: 8px; }"
+        "QLabel#TaskManagerEmptyIcon { background: transparent; }"
+        "QLabel#TaskManagerEmptyTitle { color: %2; font-size: 14px; font-weight: 600; background: transparent; }"
+        "QLabel#TaskManagerEmptyDescription { color: %3; font-size: 10px; background: transparent; }"
+        "QStackedWidget#TaskManagerContentStack { background: transparent; border: none; }"
+    )
+                                         .arg(pageBackground,
+                                              primaryText,
+                                              secondaryText,
+                                              liveBackground,
+                                              liveText,
+                                              cardBackground,
+                                              borderColor,
+                                              inputBackground,
+                                              selectedBackground,
+                                              inputFocusBorder,
+                                              tableBackground,
+                                              hoverBackground,
+                                              selectedBackground,
+                                              selectionText,
+                                              buttonHover,
+                                              buttonPressed,
+                                              dangerBackground,
+                                              dangerHover,
+                                              dangerPressed));
+}
+
+void CompilerIDE::applyTaskManagerFilter()
+{
+    if (!taskManagerTable)
+    {
+        return;
+    }
+
+    const QString filter = taskManagerSearchEdit ? taskManagerSearchEdit->text().trimmed() : QString();
+    int visibleRows = 0;
+
+    for (int row = 0; row < taskManagerTable->rowCount(); ++row)
+    {
+        bool matches = filter.isEmpty();
+        if (!matches)
+        {
+            for (int column = 0; column < taskManagerTable->columnCount(); ++column)
+            {
+                const QTableWidgetItem *item = taskManagerTable->item(row, column);
+                if (item && item->text().contains(filter, Qt::CaseInsensitive))
+                {
+                    matches = true;
+                    break;
+                }
+            }
+        }
+
+        taskManagerTable->setRowHidden(row, !matches);
+        if (matches)
+        {
+            ++visibleRows;
+        }
+    }
+
+    const int currentRow = taskManagerTable->currentRow();
+    if (currentRow >= 0 && taskManagerTable->isRowHidden(currentRow))
+    {
+        taskManagerTable->clearSelection();
+    }
+
+    if (taskManagerEmptyTitleLabel && taskManagerEmptyDescriptionLabel && !managedRunTasks.isEmpty())
+    {
+        taskManagerEmptyTitleLabel->setText(tr("没有匹配的任务"));
+        taskManagerEmptyDescriptionLabel->setText(tr("尝试更换搜索关键词。"));
+    }
+
+    if (taskManagerContentStack)
+    {
+        if (managedRunTasks.isEmpty())
+        {
+            taskManagerEmptyTitleLabel->setText(tr("没有正在运行的任务"));
+            taskManagerEmptyDescriptionLabel->setText(tr(""));
+            taskManagerContentStack->setCurrentIndex(1);
+        }
+        else if (visibleRows == 0)
+        {
+            taskManagerContentStack->setCurrentIndex(1);
+        }
+        else
+        {
+            taskManagerContentStack->setCurrentIndex(0);
+        }
+    }
+}
+
+BOOL CALLBACK CompilerIDE::enumManagedTaskWindowsProc(HWND windowHandle, LPARAM parameter)
+{
+    TaskWindowEnumerationContext *context = reinterpret_cast<TaskWindowEnumerationContext *>(parameter);
+    if (!context || !context->processIds || !context->windows)
+    {
+        return TRUE;
+    }
+
+    if (!IsWindowVisible(windowHandle))
+    {
+        return TRUE;
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(windowHandle, &processId);
+
+    bool matches = context->processIds->contains(processId);
+    if (!matches && !context->expectedWindowTitle.isEmpty())
+    {
+        wchar_t titleBuffer[1024] = {};
+        const int titleLength = GetWindowTextW(windowHandle, titleBuffer, static_cast<int>(std::size(titleBuffer)));
+        if (titleLength > 0)
+        {
+            const QString title = QString::fromWCharArray(titleBuffer, titleLength);
+            matches = title.contains(context->expectedWindowTitle, Qt::CaseInsensitive);
+        }
+    }
+
+    if (matches)
+    {
+        context->windows->append(windowHandle);
+    }
+
+    return TRUE;
+}
+
+quint64 CompilerIDE::getProcessCreationTimeValue(DWORD processId) const
+{
+    HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!processHandle)
+    {
+        return 0;
+    }
+
+    FILETIME creationTime = {};
+    FILETIME exitTime = {};
+    FILETIME kernelTime = {};
+    FILETIME userTime = {};
+    const BOOL success = GetProcessTimes(processHandle, &creationTime, &exitTime, &kernelTime, &userTime);
+    CloseHandle(processHandle);
+
+    if (!success)
+    {
+        return 0;
+    }
+
+    ULARGE_INTEGER value = {};
+    value.LowPart = creationTime.dwLowDateTime;
+    value.HighPart = creationTime.dwHighDateTime;
+    return value.QuadPart;
+}
+
+bool CompilerIDE::isManagedRunTaskAlive(const ManagedRunTask &task) const
+{
+    if (task.rootProcessId == 0)
+    {
+        return false;
+    }
+
+    HANDLE processHandle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, task.rootProcessId);
+    if (!processHandle)
+    {
+        return false;
+    }
+
+    const DWORD waitResult = WaitForSingleObject(processHandle, 0);
+    bool alive = waitResult == WAIT_TIMEOUT;
+
+    if (alive && task.creationTime != 0)
+    {
+        FILETIME creationTime = {};
+        FILETIME exitTime = {};
+        FILETIME kernelTime = {};
+        FILETIME userTime = {};
+        if (GetProcessTimes(processHandle, &creationTime, &exitTime, &kernelTime, &userTime))
+        {
+            ULARGE_INTEGER value = {};
+            value.LowPart = creationTime.dwLowDateTime;
+            value.HighPart = creationTime.dwHighDateTime;
+            alive = value.QuadPart == task.creationTime;
+        }
+    }
+
+    CloseHandle(processHandle);
+    return alive;
+}
+
+QSet<DWORD> CompilerIDE::collectManagedProcessTree(DWORD rootProcessId) const
+{
+    QSet<DWORD> processIds;
+    if (rootProcessId == 0)
+    {
+        return processIds;
+    }
+
+    processIds.insert(rootProcessId);
+
+    QList<QPair<DWORD, DWORD>> relationships;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+    {
+        return processIds;
+    }
+
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(PROCESSENTRY32W);
+    if (Process32FirstW(snapshot, &entry))
+    {
+        do
+        {
+            relationships.append(qMakePair(entry.th32ParentProcessID, entry.th32ProcessID));
+        } while (Process32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (const QPair<DWORD, DWORD> &relationship : relationships)
+        {
+            if (processIds.contains(relationship.first) && !processIds.contains(relationship.second))
+            {
+                processIds.insert(relationship.second);
+                changed = true;
+            }
+        }
+    }
+
+    return processIds;
+}
+
+QList<HWND> CompilerIDE::collectManagedTaskWindows(const ManagedRunTask &task) const
+{
+    QList<HWND> windows;
+    const QSet<DWORD> processIds = collectManagedProcessTree(task.rootProcessId);
+
+    TaskWindowEnumerationContext context;
+    context.processIds = &processIds;
+    context.expectedWindowTitle = task.expectedWindowTitle;
+    context.windows = &windows;
+
+    EnumWindows(&CompilerIDE::enumManagedTaskWindowsProc, reinterpret_cast<LPARAM>(&context));
+    return windows;
+}
+
+QString CompilerIDE::getWindowTitleText(HWND windowHandle) const
+{
+    if (!windowHandle || !IsWindow(windowHandle))
+    {
+        return QString();
+    }
+
+    wchar_t titleBuffer[1024] = {};
+    const int titleLength = GetWindowTextW(windowHandle, titleBuffer, static_cast<int>(std::size(titleBuffer)));
+    if (titleLength <= 0)
+    {
+        return tr("(无标题)");
+    }
+
+    return QString::fromWCharArray(titleBuffer, titleLength);
+}
+
+QString CompilerIDE::getProcessImagePath(DWORD processId) const
+{
+    HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!processHandle)
+    {
+        return QString();
+    }
+
+    wchar_t pathBuffer[32768] = {};
+    DWORD pathLength = static_cast<DWORD>(std::size(pathBuffer));
+    const BOOL success = QueryFullProcessImageNameW(processHandle, 0, pathBuffer, &pathLength);
+    CloseHandle(processHandle);
+
+    if (!success)
+    {
+        return QString();
+    }
+
+    return QDir::toNativeSeparators(QString::fromWCharArray(pathBuffer, static_cast<int>(pathLength)));
+}
+
+quint64 CompilerIDE::getProcessMemoryBytes(DWORD processId) const
+{
+    HANDLE processHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    if (!processHandle)
+    {
+        return 0;
+    }
+
+    PROCESS_MEMORY_COUNTERS_EX memoryCounters = {};
+    const BOOL success = GetProcessMemoryInfo(processHandle,
+                                              reinterpret_cast<PPROCESS_MEMORY_COUNTERS>(&memoryCounters),
+                                              sizeof(memoryCounters));
+    CloseHandle(processHandle);
+
+    if (!success)
+    {
+        return 0;
+    }
+
+    return static_cast<quint64>(memoryCounters.WorkingSetSize);
+}
+
+int CompilerIDE::getManagedProcessThreadCount(const QSet<DWORD> &processIds) const
+{
+    if (processIds.isEmpty())
+    {
+        return 0;
+    }
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+    {
+        return 0;
+    }
+
+    int threadCount = 0;
+    THREADENTRY32 entry = {};
+    entry.dwSize = sizeof(THREADENTRY32);
+    if (Thread32First(snapshot, &entry))
+    {
+        do
+        {
+            if (processIds.contains(entry.th32OwnerProcessID))
+            {
+                ++threadCount;
+            }
+        } while (Thread32Next(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return threadCount;
+}
+
+void CompilerIDE::registerManagedRunTask(DWORD processId,
+                                         const QString &programPath,
+                                         const QString &expectedWindowTitle,
+                                         bool detached)
+{
+    if (processId == 0)
+    {
+        return;
+    }
+
+    ManagedRunTask task;
+    task.rootProcessId = processId;
+    task.creationTime = getProcessCreationTimeValue(processId);
+    task.programPath = QDir::toNativeSeparators(QFileInfo(programPath).absoluteFilePath());
+    task.expectedWindowTitle = expectedWindowTitle;
+    task.startTime = QDateTime::currentDateTime();
+    task.detached = detached;
+    managedRunTasks.insert(processId, task);
+
+    QTimer::singleShot(100, this, &CompilerIDE::updateTaskManager);
+}
+
+DWORD CompilerIDE::selectedManagedTaskId() const
+{
+    if (!taskManagerTable)
+    {
+        return 0;
+    }
+
+    const int row = taskManagerTable->currentRow();
+    if (row < 0)
+    {
+        return 0;
+    }
+
+    QTableWidgetItem *item = taskManagerTable->item(row, 0);
+    if (!item)
+    {
+        return 0;
+    }
+
+    bool ok = false;
+    const quint64 processId = item->data(Qt::UserRole).toULongLong(&ok);
+    if (!ok || processId == 0 || processId > std::numeric_limits<DWORD>::max())
+    {
+        return 0;
+    }
+
+    return static_cast<DWORD>(processId);
+}
+
+void CompilerIDE::updateTaskManager()
+{
+    if (!taskManagerTable || !taskManagerSummaryLabel)
+    {
+        return;
+    }
+
+    const DWORD selectedProcessId = selectedManagedTaskId();
+    const QList<DWORD> processIds = managedRunTasks.keys();
+    for (DWORD processId : processIds)
+    {
+        const ManagedRunTask task = managedRunTasks.value(processId);
+        if (isManagedRunTaskAlive(task))
+        {
+            continue;
+        }
+
+        if (hRunningProcess != NULL && GetProcessId(hRunningProcess) == processId)
+        {
+            CloseHandle(hRunningProcess);
+            hRunningProcess = NULL;
+            if (currentRunningExe == task.programPath ||
+                QFileInfo(currentRunningExe).absoluteFilePath() == QFileInfo(task.programPath).absoluteFilePath())
+            {
+                currentRunningExe.clear();
+            }
+        }
+
+        managedRunTasks.remove(processId);
+    }
+
+    taskManagerTable->setUpdatesEnabled(false);
+    taskManagerTable->setRowCount(managedRunTasks.size());
+
+    int row = 0;
+    int totalWindowCount = 0;
+    int totalProcessCount = 0;
+    int selectedRow = -1;
+    quint64 totalMemoryBytes = 0;
+    static QFileIconProvider iconProvider;
+
+    for (auto it = managedRunTasks.cbegin(); it != managedRunTasks.cend(); ++it)
+    {
+        const ManagedRunTask &task = it.value();
+        const QSet<DWORD> processTree = collectManagedProcessTree(task.rootProcessId);
+        const QList<HWND> windows = collectManagedTaskWindows(task);
+        totalWindowCount += windows.size();
+        totalProcessCount += processTree.size();
+
+        quint64 taskMemoryBytes = 0;
+        for (DWORD processId : processTree)
+        {
+            taskMemoryBytes += getProcessMemoryBytes(processId);
+        }
+        totalMemoryBytes += taskMemoryBytes;
+
+        QStringList windowTitles;
+        for (HWND windowHandle : windows)
+        {
+            const QString title = getWindowTitleText(windowHandle);
+            if (!title.isEmpty() && !windowTitles.contains(title))
+            {
+                windowTitles.append(title);
+            }
+        }
+
+        QString windowText;
+        if (windows.isEmpty())
+        {
+            windowText = tr("正在启动或无可见窗口");
+        }
+        else if (windowTitles.isEmpty())
+        {
+            windowText = tr("%1 个活动窗口").arg(windows.size());
+        }
+        else if (windows.size() == 1)
+        {
+            windowText = windowTitles.first();
+        }
+        else
+        {
+            windowText = tr("%1 个窗口 · %2").arg(windows.size()).arg(windowTitles.first());
+        }
+
+        const QFileInfo programInfo(task.programPath);
+        const QString programName = programInfo.fileName().isEmpty()
+                                        ? task.programPath
+                                        : programInfo.fileName();
+        const QString memoryText = taskMemoryBytes >= 1024ULL * 1024ULL * 1024ULL
+                                       ? tr("%1 GB").arg(taskMemoryBytes / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2)
+                                       : tr("%1 MB").arg(taskMemoryBytes / (1024.0 * 1024.0), 0, 'f', 1);
+
+        QList<QTableWidgetItem *> items;
+        QTableWidgetItem *programItem = new QTableWidgetItem(iconProvider.icon(programInfo), programName);
+        items.append(programItem);
+        items.append(new QTableWidgetItem(QString::number(task.rootProcessId)));
+        items.append(new QTableWidgetItem(windowText));
+        items.append(new QTableWidgetItem(QString::number(processTree.size())));
+        items.append(new QTableWidgetItem(memoryText));
+        items.append(new QTableWidgetItem(task.startTime.toString("HH:mm:ss")));
+        items.append(new QTableWidgetItem(tr("●  运行中")));
+
+        for (int column = 0; column < items.size(); ++column)
+        {
+            QTableWidgetItem *item = items.at(column);
+            item->setData(Qt::UserRole, static_cast<qulonglong>(task.rootProcessId));
+            item->setToolTip(task.programPath);
+            if (column == 1 || column == 3 || column == 4 || column == 5 || column == 6)
+            {
+                item->setTextAlignment(Qt::AlignCenter);
+            }
+            taskManagerTable->setItem(row, column, item);
+        }
+
+        items.at(2)->setToolTip(windowTitles.isEmpty() ? task.programPath : windowTitles.join("\n"));
+        items.at(6)->setForeground(themeMode == ThemeMode::Dark ? QColor("#72D792") : QColor("#137333"));
+
+        if (task.rootProcessId == selectedProcessId)
+        {
+            selectedRow = row;
+        }
+
+        ++row;
+    }
+
+    taskManagerTable->setUpdatesEnabled(true);
+
+    if (selectedRow >= 0)
+    {
+        taskManagerTable->selectRow(selectedRow);
+    }
+    else
+    {
+        taskManagerTable->clearSelection();
+    }
+
+    const QString totalMemoryText = totalMemoryBytes >= 1024ULL * 1024ULL * 1024ULL
+                                        ? tr("%1 GB").arg(totalMemoryBytes / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2)
+                                        : tr("%1 MB").arg(totalMemoryBytes / (1024.0 * 1024.0), 0, 'f', 1);
+
+    taskManagerSummaryLabel->setText(tr("仅显示由 Compiler IDE 启动的任务"));
+    if (taskManagerTaskValueLabel)
+    {
+        taskManagerTaskValueLabel->setText(QString::number(managedRunTasks.size()));
+    }
+    if (taskManagerWindowValueLabel)
+    {
+        taskManagerWindowValueLabel->setText(QString::number(totalWindowCount));
+    }
+    if (taskManagerProcessValueLabel)
+    {
+        taskManagerProcessValueLabel->setText(QString::number(totalProcessCount));
+    }
+    if (taskManagerMemoryValueLabel)
+    {
+        taskManagerMemoryValueLabel->setText(totalMemoryText);
+    }
+
+    applyTaskManagerFilter();
+
+    const bool hasSelection = selectedManagedTaskId() != 0;
+    taskManagerDetailsButton->setEnabled(hasSelection);
+    taskManagerEndButton->setEnabled(hasSelection);
+}
+
+void CompilerIDE::showSelectedTaskDetails()
+{
+    const DWORD processId = selectedManagedTaskId();
+    if (processId == 0 || !managedRunTasks.contains(processId))
+    {
+        return;
+    }
+
+    const ManagedRunTask task = managedRunTasks.value(processId);
+    if (!isManagedRunTaskAlive(task))
+    {
+        updateTaskManager();
+        return;
+    }
+
+    const QSet<DWORD> processTree = collectManagedProcessTree(processId);
+    const QList<HWND> windows = collectManagedTaskWindows(task);
+
+    QStringList processLines;
+    quint64 totalMemoryBytes = 0;
+    for (DWORD childProcessId : processTree)
+    {
+        const QString imagePath = getProcessImagePath(childProcessId);
+        const quint64 memoryBytes = getProcessMemoryBytes(childProcessId);
+        totalMemoryBytes += memoryBytes;
+        const QString displayPath = imagePath.isEmpty() ? tr("(无法读取路径)") : imagePath;
+        processLines.append(tr("PID %1  %2  %3 MB")
+                                .arg(childProcessId)
+                                .arg(displayPath)
+                                .arg(memoryBytes / (1024.0 * 1024.0), 0, 'f', 1));
+    }
+
+    QStringList windowLines;
+    for (HWND windowHandle : windows)
+    {
+        DWORD ownerProcessId = 0;
+        GetWindowThreadProcessId(windowHandle, &ownerProcessId);
+
+        wchar_t classBuffer[256] = {};
+        const int classLength = GetClassNameW(windowHandle, classBuffer, static_cast<int>(std::size(classBuffer)));
+        const QString className = classLength > 0
+                                      ? QString::fromWCharArray(classBuffer, classLength)
+                                      : tr("(未知)");
+
+        RECT rect = {};
+        const bool hasRect = GetWindowRect(windowHandle, &rect) != FALSE;
+        const QString geometry = hasRect
+                                     ? QString("%1, %2, %3 x %4")
+                                           .arg(rect.left)
+                                           .arg(rect.top)
+                                           .arg(rect.right - rect.left)
+                                           .arg(rect.bottom - rect.top)
+                                     : tr("(未知)");
+
+        const QString handleText = QString("0x%1")
+                                       .arg(static_cast<qulonglong>(reinterpret_cast<quintptr>(windowHandle)),
+                                            0, 16)
+                                       .toUpper();
+
+        windowLines.append(tr("HWND %1\n标题: %2\n类名: %3\nPID: %4\n位置: %5")
+                               .arg(handleText)
+                               .arg(getWindowTitleText(windowHandle))
+                               .arg(className)
+                               .arg(ownerProcessId)
+                               .arg(geometry));
+    }
+
+    const qint64 runningSeconds = qMax<qint64>(0, task.startTime.secsTo(QDateTime::currentDateTime()));
+    const int threadCount = getManagedProcessThreadCount(processTree);
+
+    QString details;
+    details += tr("程序: %1\n").arg(task.programPath);
+    details += tr("根进程 PID: %1\n").arg(task.rootProcessId);
+    details += tr("启动时间: %1\n").arg(task.startTime.toString("yyyy-MM-dd HH:mm:ss"));
+    details += tr("运行时长: %1\n").arg(formatUptime(runningSeconds));
+    details += tr("启动方式: %1\n").arg(task.detached ? tr("备用分离启动") : tr("控制台启动"));
+    details += tr("进程数: %1\n").arg(processTree.size());
+    details += tr("线程数: %1\n").arg(threadCount);
+    details += tr("总工作集: %1 MB\n").arg(totalMemoryBytes / (1024.0 * 1024.0), 0, 'f', 1);
+    details += tr("可见窗口数: %1\n\n").arg(windows.size());
+    details += tr("进程信息\n%1\n\n").arg(processLines.isEmpty() ? tr("(无)") : processLines.join("\n"));
+    details += tr("窗口信息\n%1").arg(windowLines.isEmpty() ? tr("(当前没有可见窗口)") : windowLines.join("\n\n"));
+
+    QDialog dialog(this);
+    dialog.setObjectName("TaskManagerDetailsDialog");
+    dialog.setWindowTitle(tr("任务详细信息 - %1").arg(QFileInfo(task.programPath).fileName()));
+    dialog.resize(780, 580);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(18, 18, 18, 18);
+    layout->setSpacing(12);
+
+    QLabel *detailsTitleLabel = new QLabel(QFileInfo(task.programPath).fileName(), &dialog);
+    detailsTitleLabel->setObjectName("TaskManagerDetailsTitle");
+
+    QLabel *detailsPathLabel = new QLabel(task.programPath, &dialog);
+    detailsPathLabel->setObjectName("TaskManagerDetailsPath");
+    detailsPathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    detailsPathLabel->setWordWrap(true);
+
+    QPlainTextEdit *detailsEdit = new QPlainTextEdit(&dialog);
+    detailsEdit->setObjectName("TaskManagerDetailsText");
+    detailsEdit->setReadOnly(true);
+    detailsEdit->setPlainText(details);
+    detailsEdit->setLineWrapMode(QPlainTextEdit::NoWrap);
+
+    QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    QPushButton *closeButton = buttonBox->button(QDialogButtonBox::Close);
+    if (closeButton)
+    {
+        closeButton->setText(tr("关闭"));
+        closeButton->setObjectName("TaskManagerDetailsCloseButton");
+    }
+
+    const bool detailsDark = themeMode == ThemeMode::Dark;
+    const bool detailsEyeCare = themeMode == ThemeMode::EyeCare;
+    const QString detailsBackground = detailsDark ? "#202020" : detailsEyeCare ? "#F7F0DE" : "#F7F7F7";
+    const QString detailsPanel = detailsDark ? "#272727" : detailsEyeCare ? "#FFF9EA" : "#FFFFFF";
+    const QString detailsTextColor = detailsDark ? "#F2F2F2" : detailsEyeCare ? "#3B3A32" : "#1F1F1F";
+    const QString detailsSecondary = detailsDark ? "#AFAFAF" : detailsEyeCare ? "#716A59" : "#6B6B6B";
+    const QString detailsBorder = detailsDark ? "#3D3D3D" : detailsEyeCare ? "#D4C59D" : "#E1E1E1";
+    const QString detailsHover = detailsDark ? "#3B3B3B" : detailsEyeCare ? "#EFE4C6" : "#EEEEEE";
+
+    dialog.setStyleSheet(QString(
+        "QDialog#TaskManagerDetailsDialog { background: %1; }"
+        "QLabel#TaskManagerDetailsTitle { color: %2; font-size: 18px; font-weight: 600; background: transparent; }"
+        "QLabel#TaskManagerDetailsPath { color: %3; font-size: 10px; background: transparent; }"
+        "QPlainTextEdit#TaskManagerDetailsText { background: %4; color: %2; border: 1px solid %5; border-radius: 8px; padding: 10px; selection-background-color: #0067C0; }"
+        "QPushButton#TaskManagerDetailsCloseButton { background: transparent; color: %2; border: 1px solid %5; border-radius: 6px; padding: 6px 18px; min-height: 20px; }"
+        "QPushButton#TaskManagerDetailsCloseButton:hover { background: %6; }"
+    )
+                             .arg(detailsBackground,
+                                  detailsTextColor,
+                                  detailsSecondary,
+                                  detailsPanel,
+                                  detailsBorder,
+                                  detailsHover));
+
+    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+
+    layout->addWidget(detailsTitleLabel);
+    layout->addWidget(detailsPathLabel);
+    layout->addWidget(detailsEdit, 1);
+    layout->addWidget(buttonBox);
+    dialog.exec();
+}
+
+void CompilerIDE::terminateManagedRunTask(DWORD processId)
+{
+    if (processId == 0 || !managedRunTasks.contains(processId))
+    {
+        return;
+    }
+
+    const ManagedRunTask task = managedRunTasks.value(processId);
+    if (!isManagedRunTaskAlive(task))
+    {
+        managedRunTasks.remove(processId);
+        return;
+    }
+    const QList<HWND> windows = collectManagedTaskWindows(task);
+    for (HWND windowHandle : windows)
+    {
+        PostMessageW(windowHandle, WM_CLOSE, 0, 0);
+    }
+
+    QSet<DWORD> processTree = collectManagedProcessTree(processId);
+    QList<DWORD> terminationOrder = processTree.values();
+    terminationOrder.removeAll(processId);
+    terminationOrder.append(processId);
+
+    for (DWORD childProcessId : terminationOrder)
+    {
+        if (childProcessId == 0 || childProcessId == GetCurrentProcessId())
+        {
+            continue;
+        }
+
+        HANDLE processHandle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, childProcessId);
+        if (!processHandle)
+        {
+            continue;
+        }
+
+        TerminateProcess(processHandle, 1);
+        WaitForSingleObject(processHandle, 500);
+        CloseHandle(processHandle);
+    }
+
+    if (hRunningProcess != NULL && GetProcessId(hRunningProcess) == processId)
+    {
+        CloseHandle(hRunningProcess);
+        hRunningProcess = NULL;
+    }
+
+    if (currentRunningExe == task.programPath ||
+        QFileInfo(currentRunningExe).absoluteFilePath() == QFileInfo(task.programPath).absoluteFilePath())
+    {
+        currentRunningExe.clear();
+    }
+
+    managedRunTasks.remove(processId);
+}
+
+void CompilerIDE::endSelectedTask()
+{
+    const DWORD processId = selectedManagedTaskId();
+    if (processId == 0 || !managedRunTasks.contains(processId))
+    {
+        return;
+    }
+
+    const ManagedRunTask task = managedRunTasks.value(processId);
+    const QString programName = QFileInfo(task.programPath).fileName().isEmpty()
+                                    ? task.programPath
+                                    : QFileInfo(task.programPath).fileName();
+
+    const QMessageBox::StandardButton reply = QMessageBox::question(
+        this,
+        tr("结束任务"),
+        tr("确定要结束“%1”及其由 IDE 启动的子进程吗？").arg(programName),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+
+    if (reply != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    terminateManagedRunTask(processId);
+    updateTaskManager();
+    statusBar()->showMessage(tr("已结束任务: %1").arg(programName), 3000);
 }
 
 void CompilerIDE::updateSystemInfo()
@@ -18516,7 +25003,8 @@ void CompilerIDE::tempCompile()
     QString tempDir = QDir::temp().absolutePath() + "/CompilerIDE_TempBuild";
     QDir().mkpath(tempDir);
 
-    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
+    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss_zzz") + "_" +
+                        QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
     tempCompileSourceFile = tempDir + "/temp_" + timestamp + ".cpp";
     tempCompileExeFile = tempDir + "/temp_" + timestamp + ".exe";
 
@@ -18826,7 +25314,8 @@ void CompilerIDE::tempCompileAndRun()
     QString tempDir = QDir::temp().absolutePath() + "/CompilerIDE_TempBuild";
     QDir().mkpath(tempDir);
 
-    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
+    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss_zzz") + "_" +
+                        QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
     tempCompileSourceFile = tempDir + "/temp_" + timestamp + ".cpp";
     tempCompileExeFile = tempDir + "/temp_" + timestamp + ".exe";
 
@@ -18841,7 +25330,8 @@ void CompilerIDE::tempCompileAndRun()
 
     QTextStream out(&tempFile);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    out.setEncoding(QStringConverter::Utf8);
+
+out.setEncoding(QStringConverter::Utf8);
 #endif
     out << editor->toPlainText();
     tempFile.close();
@@ -19210,6 +25700,12 @@ void CompilerIDE::startDebugging()
     debuggerPath = effectiveDebuggerPath;
     debugger->setDebuggerPath(debuggerPath);
 
+    if (m_isTempCompiling || (compileProcess && compileProcess->state() != QProcess::NotRunning))
+    {
+        QMessageBox::warning(this, tr("提示"), tr("已有编译任务正在运行，请稍后..."));
+        return;
+    }
+
     debugStartAct->setEnabled(false);
 
     outputEdit->appendPlainText(tr("=== 开始调试准备 ==="));
@@ -19514,55 +26010,90 @@ void CompilerIDE::toggleBreakpoint()
     }
 }
 
+
 void CompilerIDE::showEvent(QShowEvent *event)
 {
     QMainWindow::showEvent(event);
 
+    if (!property("sidebarInitialExpandDone").toBool())
+    {
+        if (rightSidebar)
+        {
+            QString targetFeature;
+
+            for (const QString &feature : sidebarFeatureNames)
+            {
+                if (m_visibleSidebarFeatureNames.contains(feature) &&
+                    rightSidebar->isFeatureEnabled(feature))
+                {
+                    targetFeature = feature;
+                    break;
+                }
+            }
+
+            if (targetFeature.isEmpty() && !sidebarFeatureNames.isEmpty())
+            {
+                targetFeature = sidebarFeatureNames.first();
+            }
+
+            if (!targetFeature.isEmpty())
+            {
+                rightSidebar->switchToFeature(targetFeature);
+            }
+        }
+
+        setProperty("sidebarInitialExpandDone", true);
+    }
+
     QTimer::singleShot(200, this, [this]()
-                       {
-                           qDebug() << "\n=== 修复光标 ===";
+    {
+        qDebug() << "\n=== 修复光标 ===";
 
-                           while (QApplication::overrideCursor())
-                           {
-                               QApplication::restoreOverrideCursor();
-                           }
+        while (QApplication::overrideCursor())
+        {
+            QApplication::restoreOverrideCursor();
+        }
 
-                           QList<QWidget *> widgets = this->findChildren<QWidget *>();
+        QList<QWidget *> widgets = this->findChildren<QWidget *>();
 
-                           qDebug() << "总共找到" << widgets.size() << "个子控件";
+        qDebug() << "总共找到" << widgets.size() << "个子控件";
 
-                           int waitCursorCount = 0;
-                           for (QWidget *widget : widgets)
-                           {
-                               Qt::CursorShape shape = widget->cursor().shape();
-                               if (shape == Qt::WaitCursor || shape == Qt::BusyCursor)
-                               {
-                                   qDebug() << "发现等待光标:"
-                                            << widget->metaObject()->className()
-                                            << "对象名:" << widget->objectName()
-                                            << "光标形状:" << shape;
-                                   waitCursorCount++;
-                               }
-                           }
+        int waitCursorCount = 0;
 
-                           qDebug() << "发现" << waitCursorCount << "个等待光标";
+        for (QWidget *widget : widgets)
+        {
+            Qt::CursorShape shape = widget->cursor().shape();
 
-                           for (QWidget *widget : widgets)
-                           {
-                               widget->unsetCursor();
-                           }
+            if (shape == Qt::WaitCursor || shape == Qt::BusyCursor)
+            {
+                qDebug() << "发现等待光标:"
+                         << widget->metaObject()->className()
+                         << "对象名:" << widget->objectName()
+                         << "光标形状:" << shape;
 
-                           this->unsetCursor();
+                waitCursorCount++;
+            }
+        }
 
-                           CodeEditor *editor = currentEditor();
-if (editor)
-                           {
-                               editor->setCursor(Qt::IBeamCursor);
-                               qDebug() << "编辑器光标已设置为 IBeam";
-                           }
+        qDebug() << "发现" << waitCursorCount << "个等待光标";
 
-                           qDebug() << "=== 修复完成 ===\n";
-                       });
+        for (QWidget *widget : widgets)
+        {
+            widget->unsetCursor();
+        }
+
+        this->unsetCursor();
+
+        CodeEditor *editor = currentEditor();
+
+        if (editor)
+        {
+            editor->setCursor(Qt::IBeamCursor);
+            qDebug() << "编辑器光标已设置为 IBeam";
+        }
+
+        qDebug() << "=== 修复完成 ===\n";
+    });
 }
 
 void CompilerIDE::runToCursor()
@@ -19841,7 +26372,8 @@ void CompilerIDE::onCallStackUpdated(const QStringList &frames)
 void CompilerIDE::onExpressionEvaluated(const QString &expression, const QString &value)
 {
     if (watchExpressions.contains(expression))
-    {
+
+{
         QTreeWidgetItem *watchItem = nullptr;
 
         for (int i = 0; i < variablesTree->topLevelItemCount(); ++i)
@@ -20395,7 +26927,7 @@ void CompilerIDE::onDebugPaused(const QString &file, int line, const QString &re
 
     if (!file.isEmpty() && QFile::exists(file))
     {
-        int tabIndex = findEditor(file);
+        int tabIndex = findEditorByFilePath(file);
         if (tabIndex < 0)
         {
             loadFile(file);
@@ -20841,7 +27373,8 @@ void CompilerIDE::createActions()
                 if (currentEditor())
                 {
                     currentEditor()->paste();
-                }
+
+}
             });
 
     toggleCommentAct = new QAction(tr("切换注释(&/)"), this);
@@ -20881,6 +27414,10 @@ void CompilerIDE::createActions()
     connect(terminalShowAct, &QAction::triggered, this, [this](bool checked)
             {
                 terminalDock->setVisible(checked);
+                if (checked)
+                {
+                    terminalDock->raise();
+                }
             });
 
     debugPanelAct = new QAction(tr("调试面板"), this);
@@ -20891,6 +27428,10 @@ void CompilerIDE::createActions()
                 if (debugDock)
                 {
                     debugDock->setVisible(checked);
+                    if (checked)
+                    {
+                        debugDock->raise();
+                    }
                 }
             });
 
@@ -20975,10 +27516,6 @@ void CompilerIDE::createActions()
 
 void CompilerIDE::createMenus()
 {
-    // QMainWindow 默认会在菜单栏/工具栏区域右键时生成一个 Dock/ToolBar
-    // 切换菜单。右侧功能已经统一迁移到 SideBarContainer，旧 Dock 只剩空壳，
-    // 继续暴露这些 toggleViewAction 会产生“空标签页”。这里直接阻止菜单栏
-    // 的右键上下文菜单，QMainWindow::createPopupMenu() 也会在下方返回 nullptr。
     menuBar()->setContextMenuPolicy(Qt::PreventContextMenu);
 
     fileMenu = menuBar()->addMenu(tr("文件(&F)"));
@@ -21302,9 +27839,7 @@ void CompilerIDE::showUpdateInfo()
 {
     QString updateInfo = tr(
                              "<h3>Compiler IDE 自动更新</h3>"
-                             "<p>当前版本: <b>%1</b></p>"
-                             "<p>自动更新功能会在启动时检查新版本，并在安装包下载完成的 3 秒后自动开始更新。</p>"
-                             "<p>您也可以手动检查更新。</p>")
+                             "<p>当前版本: <b>%1</b></p>")
                              .arg(IDE_VERSION);
 
     QMessageBox::information(this, tr("更新信息"), updateInfo);
@@ -21577,7 +28112,7 @@ if (comp_disableAutoBrackets)
     }
     if (comp_disableDiagnostics)
     {
-        outputEdit->appendPlainText(tr("  - 诊断工具"));
+        outputEdit->appendPlainText(tr("  - 任务管理器"));
     }
     if (comp_disableProjectManager)
     {
@@ -21833,6 +28368,41 @@ void CompilerIDE::updateTimerDisplay()
     }
 }
 
+void CompilerIDE::applySidebarFeatureVisibility()
+{
+    if (!rightSidebar)
+    {
+        return;
+    }
+
+    const QString currentFeature = rightSidebar->getCurrentFeatureName();
+    for (const QString &feature : sidebarFeatureNames)
+    {
+        rightSidebar->setFeatureVisible(feature,
+                                        m_visibleSidebarFeatureNames.contains(feature));
+    }
+
+    if (m_visibleSidebarFeatureNames.contains(currentFeature) &&
+        rightSidebar->isFeatureEnabled(currentFeature))
+    {
+        if (rightSidebar->isHidden())
+        {
+            rightSidebar->switchToFeature(currentFeature);
+        }
+        return;
+    }
+
+    for (const QString &feature : sidebarFeatureNames)
+    {
+        if (rightSidebar->isFeatureVisible(feature) &&
+            rightSidebar->isFeatureEnabled(feature))
+        {
+            rightSidebar->switchToFeature(feature);
+            return;
+        }
+    }
+}
+
 void CompilerIDE::applyCompetitionModeSettings()
 {
     QString currentFeature = rightSidebar->getCurrentFeatureName();
@@ -21841,7 +28411,8 @@ void CompilerIDE::applyCompetitionModeSettings()
 
     for (const QString &name : sidebarFeatureNames)
     {
-        bool disableThisFeature = false;
+
+bool disableThisFeature = false;
 
         if (comp_disableDeepSeek && (name.contains("AI") || name.contains("DeepSeek") || name.contains(tr("助手"))))
         {
@@ -21851,7 +28422,7 @@ void CompilerIDE::applyCompetitionModeSettings()
         {
             disableThisFeature = true;
         }
-        else if (comp_disableDiagnostics && (name.contains(tr("诊断")) || name.contains("Diagnostic")))
+        else if (comp_disableDiagnostics && (name.contains(tr("任务管理器")) || name.contains("Task Manager")))
         {
             disableThisFeature = true;
         }
@@ -21862,11 +28433,11 @@ void CompilerIDE::applyCompetitionModeSettings()
 
         rightSidebar->setFeatureEnabled(name, !disableThisFeature);
 
-        if (name == currentFeature && disableThisFeature)
+        if (name == currentFeature && (disableThisFeature || !rightSidebar->isFeatureVisible(name)))
         {
             currentFeatureWillBeDisabled = true;
         }
-        if (firstEnabledFeature.isEmpty() && !disableThisFeature)
+        if (firstEnabledFeature.isEmpty() && !disableThisFeature && rightSidebar->isFeatureVisible(name))
         {
             firstEnabledFeature = name;
         }
@@ -21955,6 +28526,7 @@ void CompilerIDE::restoreNormalModeSettings()
     {
         rightSidebar->setFeatureEnabled(name, true);
     }
+    applySidebarFeatureVisibility();
 
     for (int i = 0; i < tabWidget->count(); i++)
     {
@@ -22453,6 +29025,7 @@ void CompilerIDE::createStatusBar()
     statusBar()->addPermanentWidget(competitionStatusLabel);
 }
 
+
 void CompilerIDE::createDockWindows()
 {
     setDockOptions(dockOptions() | QMainWindow::AllowTabbedDocks | QMainWindow::AllowNestedDocks | QMainWindow::AnimatedDocks);
@@ -22841,12 +29414,15 @@ void CompilerIDE::writeSettings()
     settings.setValue("size", size());
     settings.setValue("compilerPath", compilerPath);
     settings.setValue("debuggerPath", debuggerPath);
-    settings.setValue("autoBrackets", autoBrackets);
+
+settings.setValue("autoBrackets", autoBrackets);
     settings.setValue("autoQuotes", autoQuotes);
     settings.setValue("codeBeautify", codeBeautify);
     settings.setValue("editorFontFamily", editorFont.family());
     settings.setValue("editorFontSize", editorFont.pointSize());
     settings.setValue("codeCompletion", codeCompletionEnabled);
+    settings.setValue("completionAcceptMode", static_cast<int>(completionAcceptMode));
+    settings.setValue("indentationMode", static_cast<int>(indentationMode));
     settings.setValue("autoIndent", autoIndent);
     settings.setValue("indentSize", indentSize);
     settings.setValue("codeFolding", codeFolding);
@@ -22861,6 +29437,7 @@ void CompilerIDE::writeSettings()
     settings.setValue("optimizationLevel", optimizationLevel);
     settings.setValue("customCompileCommands", customCompileCommands);
     settings.setValue("currentCustomCompileCommand", currentCustomCompileCommand.trimmed());
+    settings.setValue("sidebarVisibleFeatures", m_visibleSidebarFeatureNames);
 
     qDebug() << "设置已保存 - 编译器路径:" << compilerPath;
     qDebug() << "调试器路径:" << debuggerPath;
@@ -22950,6 +29527,24 @@ void CompilerIDE::readSettings()
     autoQuotes = settings.value("autoQuotes", true).toBool();
     codeBeautify = settings.value("codeBeautify", true).toBool();
     codeCompletionEnabled = settings.value("codeCompletion", true).toBool();
+    int savedCompletionAcceptMode = settings.value(
+        "completionAcceptMode",
+        static_cast<int>(CompletionAcceptMode::Tab)).toInt();
+    savedCompletionAcceptMode = qBound(
+        static_cast<int>(CompletionAcceptMode::Tab),
+        savedCompletionAcceptMode,
+        static_cast<int>(CompletionAcceptMode::Space));
+    completionAcceptMode = static_cast<CompletionAcceptMode>(savedCompletionAcceptMode);
+
+    int savedIndentationMode = settings.value(
+        "indentationMode",
+        static_cast<int>(IndentationMode::Spaces)).toInt();
+    savedIndentationMode = qBound(
+        static_cast<int>(IndentationMode::Tabs),
+        savedIndentationMode,
+        static_cast<int>(IndentationMode::Spaces));
+    indentationMode = static_cast<IndentationMode>(savedIndentationMode);
+
     QString fontFamily = settings.value("editorFontFamily", "Consolas").toString();
     int fontSize = settings.value("editorFontSize", 11).toInt();
     qDebug() << "[readSettings] 读取字体:" << fontFamily << fontSize;
@@ -23125,6 +29720,7 @@ bool CompilerIDE::maybeSave()
 bool CompilerIDE::maybeSaveAll()
 {
     QList<QPair<int, CodeEditor *>> modifiedEditors;
+    QList<QPair<int, MarkdownEditor *>> modifiedMarkdownEditors;
 
     for (int i = 0; i < tabWidget->count(); i++)
     {
@@ -23133,9 +29729,14 @@ bool CompilerIDE::maybeSaveAll()
         {
             modifiedEditors.append(qMakePair(i, editor));
         }
+        MarkdownEditor *markdownEditor = qobject_cast<MarkdownEditor *>(tabWidget->widget(i));
+        if (markdownEditor && markdownEditor->isModified())
+        {
+            modifiedMarkdownEditors.append(qMakePair(i, markdownEditor));
+        }
     }
 
-    if (modifiedEditors.isEmpty())
+    if (modifiedEditors.isEmpty() && modifiedMarkdownEditors.isEmpty())
     {
         return true;
     }
@@ -23202,6 +29803,55 @@ bool CompilerIDE::maybeSaveAll()
             }
         }
         else if (ret == QMessageBox::Cancel)
+        {
+            return false;
+        }
+    }
+
+    for (const auto &pair : modifiedMarkdownEditors)
+    {
+        const int index = tabWidget->indexOf(pair.second);
+        MarkdownEditor *markdownEditor = pair.second;
+        if (index < 0 || !markdownEditor || !markdownEditor->isModified())
+        {
+            continue;
+        }
+
+        tabWidget->setCurrentIndex(index);
+        markdownEditor->setFocus();
+        QString fileName = tabWidget->tabText(index);
+        if (fileName.endsWith('*'))
+        {
+            fileName.chop(1);
+        }
+
+        const QMessageBox::StandardButton choice = QMessageBox::warning(
+            this, tr("Compiler IDE"),
+            tr("Markdown 文档 %1 尚未保存，是否保存更改？").arg(fileName),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            QMessageBox::Save);
+        if (choice == QMessageBox::Cancel)
+        {
+            return false;
+        }
+        if (choice != QMessageBox::Save)
+        {
+            continue;
+        }
+
+        QString filePath = m_markdownFilePaths.value(markdownEditor);
+        if (filePath.isEmpty())
+        {
+            filePath = QFileDialog::getSaveFileName(
+                this, tr("另存为"), QDir::homePath() + "/" + fileName,
+                tr("Markdown 文件 (*.md *.markdown)"));
+            if (filePath.isEmpty())
+            {
+                return false;
+            }
+        }
+
+        if (!saveMarkdownFile(markdownEditor, filePath))
         {
             return false;
         }
@@ -23729,39 +30379,23 @@ bool CompilerIDE::isCompetitiveCompanionManagedPath(const QString &filePath) con
 
 void CompilerIDE::cleanupCompetitiveCompanionSessionFiles()
 {
-    QSet<QString> candidates = competitiveCompanionSessionFiles;
-    QDir defaultDir(competitiveCompanionDefaultDirectory());
-    if (defaultDir.exists())
-    {
-        const QFileInfoList legacyFiles = defaultDir.entryInfoList(
-            QStringList() << "*.cpp" << "*.cc" << "*.cxx",
-            QDir::Files | QDir::Readable,
-            QDir::Name);
-        for (const QFileInfo &info : legacyFiles)
-        {
-            candidates.insert(info.absoluteFilePath());
-        }
-    }
-
     QStringList removedFiles;
-    const QSet<QString> filesToInspect = candidates;
-    for (const QString &path : filesToInspect)
+    const QSet<QString> candidates = competitiveCompanionSessionFiles;
+    for (const QString &path : candidates)
     {
-        if (!isCompetitiveCompanionManagedPath(path) || !QFileInfo::exists(path))
+        if (!isCompetitiveCompanionManagedPath(path) || !competitiveCompanionPristineHashes.contains(path))
         {
             continue;
         }
 
         QFile file(path);
-        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        if (!file.open(QIODevice::ReadOnly))
         {
-            qWarning() << "[Competitive Companion] Cannot inspect temporary source:" << path;
             continue;
         }
-        const QString header = QString::fromUtf8(file.read(64 * 1024));
+        const QByteArray currentHash = QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256);
         file.close();
-
-        if (!header.contains("// Problem: "))
+        if (currentHash != competitiveCompanionPristineHashes.value(path))
         {
             continue;
         }
@@ -23770,22 +30404,18 @@ void CompilerIDE::cleanupCompetitiveCompanionSessionFiles()
         {
             removedFiles.append(path);
             recentFiles.removeAll(path);
-            qDebug() << "[Competitive Companion] Removed temporary source:" << path;
-        }
-        else
-        {
-            qWarning() << "[Competitive Companion] Failed to remove temporary source:" << path;
         }
     }
 
     competitiveCompanionSessionFiles.clear();
+    competitiveCompanionPristineHashes.clear();
     if (!removedFiles.isEmpty())
     {
         saveRecentFiles();
     }
 
-    if (defaultDir.exists() &&
-        defaultDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty())
+    QDir defaultDir(competitiveCompanionDefaultDirectory());
+    if (defaultDir.exists() && defaultDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty())
     {
         QDir parentDir(QFileInfo(defaultDir.absolutePath()).absolutePath());
         parentDir.rmdir(QFileInfo(defaultDir.absolutePath()).fileName());
@@ -23837,11 +30467,79 @@ void CompilerIDE::updateCompetitiveCompanionPanelStyle(bool dark)
             .arg(buttonText, buttonHoverText, buttonHoverBackground));
 }
 
+static QString sampleTesterZipImportIconPath(bool dark)
+{
+    const QString fileName = dark
+                                 ? QStringLiteral("file-arrow-up_Use_in_dark_mode.svg")
+                                 : QStringLiteral("file-arrow-up_Use_in_light_mode.svg");
+    const QString resourcePath = QStringLiteral(":/icons/") + fileName;
+    if (QFile::exists(resourcePath))
+    {
+        return resourcePath;
+    }
+
+    const QStringList candidates =
+        {
+            QCoreApplication::applicationDirPath() + QLatin1Char('/') + fileName,
+            QCoreApplication::applicationDirPath() + QStringLiteral("/icons/") + fileName,
+            QDir::current().absoluteFilePath(fileName),
+            QDir::current().absoluteFilePath(QStringLiteral("icons/") + fileName)};
+    for (const QString &candidate : candidates)
+    {
+        if (QFile::exists(candidate))
+        {
+            return candidate;
+        }
+    }
+
+    return resourcePath;
+}
+
+static QString sampleTesterAddTestPointIconPath(ThemeMode mode)
+{
+    QString fileName;
+    if (mode == ThemeMode::Dark)
+    {
+        fileName = QStringLiteral("list-plus_Use_in_Dark_mode.svg");
+    }
+    else if (mode == ThemeMode::EyeCare)
+    {
+        fileName = QStringLiteral("list-plus_Use_in_Eyecare_mode.svg");
+    }
+    else
+    {
+        fileName = QStringLiteral("list-plus_Use_in_Light_mode.svg");
+    }
+
+    const QString resourcePath = QStringLiteral(":/icons/") + fileName;
+    if (QFile::exists(resourcePath))
+    {
+        return resourcePath;
+    }
+
+    const QStringList candidates =
+        {
+            QCoreApplication::applicationDirPath() + QLatin1Char('/') + fileName,
+            QCoreApplication::applicationDirPath() + QStringLiteral("/icons/") + fileName,
+            QDir::current().absoluteFilePath(fileName),
+            QDir::current().absoluteFilePath(QStringLiteral("icons/") + fileName)};
+    for (const QString &candidate : candidates)
+    {
+        if (QFile::exists(candidate))
+        {
+            return candidate;
+        }
+    }
+
+    return resourcePath;
+}
+
 void CompilerIDE::updateSampleTesterStyle(bool dark)
 {
     if (!sampleTesterWidget)
     {
-        return;
+
+return;
     }
 
     const bool eyeCare = !dark && themeMode == ThemeMode::EyeCare;
@@ -23929,6 +30627,21 @@ void CompilerIDE::updateSampleTesterStyle(bool dark)
         "QPushButton#sampleAddButton:pressed {"
         "  background-color: %3;"
         "}"
+        "QPushButton#sampleAddButton {"
+        "  padding: 4px;"
+        "}"
+        "QPushButton#sampleImportButton {"
+        "  background: transparent;"
+        "  border: 1px solid %6;"
+        "  border-radius: 7px;"
+        "  padding: 4px;"
+        "}"
+        "QPushButton#sampleImportButton:hover {"
+        "  background-color: %9;"
+        "}"
+        "QPushButton#sampleImportButton:pressed {"
+        "  background-color: %3;"
+        "}"
         "QPushButton#sampleRunAllButton {"
         "  background-color: %6;"
         "  color: white;"
@@ -24003,6 +30716,16 @@ void CompilerIDE::updateSampleTesterStyle(bool dark)
                  .arg(spinButtonHover)
                  .arg(spinButtonPressed);
     sampleTesterWidget->setStyleSheet(style);
+
+    if (importTestsFromZipBtn)
+    {
+        importTestsFromZipBtn->setIcon(QIcon(sampleTesterZipImportIconPath(dark)));
+    }
+
+    if (addTestBtn)
+    {
+        addTestBtn->setIcon(QIcon(sampleTesterAddTestPointIconPath(themeMode)));
+    }
 
     for (QWidget *testWidget : testCaseWidgets)
     {
@@ -24514,6 +31237,13 @@ QString CompilerIDE::createCompetitiveCompanionSourceFile(const QJsonObject &pro
         {
             *created = true;
         }
+        const QString normalizedCreatedPath = QFileInfo(filePath).absoluteFilePath();
+        if (isCompetitiveCompanionManagedPath(normalizedCreatedPath))
+        {
+            competitiveCompanionPristineHashes.insert(
+                normalizedCreatedPath,
+                QCryptographicHash::hash(templateData, QCryptographicHash::Sha256));
+        }
     }
 
     const QString absoluteFilePath = QFileInfo(filePath).absoluteFilePath();
@@ -24606,6 +31336,1546 @@ clearSampleTesterCases();
                                testCasesScrollArea->viewport()->update();
                            }
                        });
+}
+
+namespace
+{
+struct ZipArchiveEntry
+{
+    QString name;
+    quint16 flags = 0;
+    quint16 method = 0;
+    quint32 crc32 = 0;
+    quint64 compressedSize = 0;
+    quint64 uncompressedSize = 0;
+    quint64 localHeaderOffset = 0;
+};
+
+struct ZipTestSample
+{
+    QString input;
+    QString answer;
+    QString inputFileName;
+    QString answerFileName;
+};
+
+struct ZipImportResult
+{
+    QList<ZipTestSample> samples;
+    QStringList skippedFiles;
+    QStringList duplicateFiles;
+    QStringList orphanAnswerFiles;
+    QStringList missingAnswerNumbers;
+    int archivedFileCount = 0;
+};
+
+class ZipBitReader
+{
+public:
+    explicit ZipBitReader(const QByteArray &data)
+        : m_data(data)
+    {
+    }
+
+    bool readBits(int count, quint32 *value)
+    {
+        if (count < 0 || count > 24 || !value)
+        {
+            return false;
+        }
+
+        while (m_bitCount < count)
+        {
+            if (m_position >= m_data.size())
+            {
+                return false;
+            }
+
+            m_bitBuffer |= static_cast<quint64>(static_cast<quint8>(m_data.at(m_position))) << m_bitCount;
+            m_position += 1;
+            m_bitCount += 8;
+        }
+
+        const quint64 mask = (static_cast<quint64>(1) << count) - 1;
+        *value = static_cast<quint32>(m_bitBuffer & mask);
+        m_bitBuffer >>= count;
+        m_bitCount -= count;
+        return true;
+    }
+
+    bool peekBits(int count, quint32 *value, int *available)
+    {
+        if (count < 0 || count > 24 || !value || !available)
+        {
+            return false;
+        }
+
+        while (m_bitCount < count && m_position < m_data.size())
+        {
+            m_bitBuffer |= static_cast<quint64>(static_cast<quint8>(m_data.at(m_position))) << m_bitCount;
+            m_position += 1;
+            m_bitCount += 8;
+        }
+
+        *available = m_bitCount;
+        if (m_bitCount <= 0)
+        {
+            *value = 0;
+            return false;
+        }
+
+        const int used = qMin(count, m_bitCount);
+        const quint64 mask = (static_cast<quint64>(1) << used) - 1;
+        *value = static_cast<quint32>(m_bitBuffer & mask);
+        return true;
+    }
+
+    bool consumeBits(int count)
+    {
+        if (count < 0 || count > m_bitCount)
+        {
+            return false;
+        }
+
+        m_bitBuffer >>= count;
+        m_bitCount -= count;
+        return true;
+    }
+
+    bool alignToByte()
+    {
+        const int drop = m_bitCount % 8;
+        m_bitBuffer >>= drop;
+        m_bitCount -= drop;
+        return true;
+    }
+
+    bool readBytes(int count, QByteArray *bytes)
+    {
+        if (count < 0 || !bytes)
+        {
+            return false;
+        }
+
+        alignToByte();
+        const qint64 start = m_position - (m_bitCount / 8);
+        if (start < 0 || start + count > m_data.size())
+        {
+            return false;
+        }
+
+        *bytes = m_data.mid(static_cast<int>(start), count);
+        m_position = start + count;
+        m_bitBuffer = 0;
+        m_bitCount = 0;
+        return true;
+    }
+
+private:
+    const QByteArray &m_data;
+    quint64 m_bitBuffer = 0;
+    qint64 m_position = 0;
+    int m_bitCount = 0;
+};
+
+struct ZipHuffmanTree
+{
+    QList<quint16> table;
+    int bitCount = 0;
+
+    bool build(const QList<int> &lengths)
+    {
+        QList<int> counts(16, 0);
+        int maxLength = 0;
+
+        for (int length : lengths)
+        {
+            if (length < 0 || length > 15)
+            {
+                return false;
+            }
+
+            if (length > 0)
+            {
+                counts[length] += 1;
+                maxLength = qMax(maxLength, length);
+            }
+        }
+
+        int remaining = 1;
+        for (int length = 1; length <= 15; ++length)
+        {
+            remaining <<= 1;
+            remaining -= counts.at(length);
+            if (remaining < 0)
+            {
+                return false;
+            }
+        }
+
+        QList<int> nextCode(16, 0);
+        int code = 0;
+        for (int length = 1; length <= 15; ++length)
+        {
+            code = (code + counts.at(length - 1)) << 1;
+            nextCode[length] = code;
+        }
+
+        bitCount = qMax(1, maxLength);
+        table = QList<quint16>(static_cast<qsizetype>(1) << bitCount, 0);
+
+        for (int symbol = 0; symbol < lengths.size(); ++symbol)
+        {
+            const int length = lengths.at(symbol);
+            if (length == 0)
+            {
+                continue;
+            }
+
+            const int assigned = nextCode.at(length);
+            nextCode[length] = assigned + 1;
+            const int reversed = reverseCode(assigned, length);
+            const int step = 1 << length;
+            for (int index = reversed; index < table.size(); index += step)
+            {
+                table[index] = static_cast<quint16>((symbol << 4) | length);
+            }
+        }
+
+        return true;
+    }
+
+    bool decode(ZipBitReader *reader, int *symbol) const
+    {
+        if (!reader || !symbol || table.isEmpty())
+        {
+            return false;
+        }
+
+        quint32 peeked = 0;
+        int available = 0;
+        if (!reader->peekBits(bitCount, &peeked, &available))
+        {
+            return false;
+        }
+
+        const quint16 entry = table.at(static_cast<int>(peeked));
+        const int length = entry & 0x0F;
+        if (length == 0 || length > available)
+        {
+            return false;
+        }
+
+        if (!reader->consumeBits(length))
+        {
+            return false;
+        }
+
+        *symbol = entry >> 4;
+        return true;
+    }
+
+private:
+    static int reverseCode(int code, int length)
+    {
+        int result = 0;
+        for (int index = 0; index < length; ++index)
+        {
+            result = (result << 1) | (code & 1);
+            code >>= 1;
+        }
+        return result;
+    }
+};
+
+static quint16 zipReadUInt16(const QByteArray &data, qsizetype offset)
+{
+    const quint16 low = static_cast<quint8>(data.at(offset));
+    const quint16 high = static_cast<quint8>(data.at(offset + 1));
+    return static_cast<quint16>(low | static_cast<quint16>(high << 8));
+}
+
+static quint32 zipReadUInt32(const QByteArray &data, qsizetype offset)
+{
+    quint32 value = 0;
+    for (int index = 3; index >= 0; --index)
+    {
+        value = (value << 8) | static_cast<quint8>(data.at(offset + index));
+    }
+    return value;
+}
+
+static quint64 zipReadUInt64(const QByteArray &data, qsizetype offset)
+{
+    quint64 value = 0;
+    for (int index = 7; index >= 0; --index)
+    {
+        value = (value << 8) | static_cast<quint8>(data.at(offset + index));
+    }
+    return value;
+}
+
+static bool zipHasSignature(const QByteArray &data, qsizetype offset, quint32 signature)
+{
+    if (offset < 0 || offset + 4 > data.size())
+    {
+        return false;
+    }
+
+    return zipReadUInt32(data, offset) == signature;
+}
+
+static quint32 zipCalculateCrc32(const QByteArray &data)
+{
+    static quint32 table[256] = {};
+    static bool initialized = false;
+
+    if (!initialized)
+    {
+        for (quint32 index = 0; index < 256; ++index)
+        {
+            quint32 value = index;
+            for (int bit = 0; bit < 8; ++bit)
+            {
+                if ((value & 1u) != 0)
+                {
+                    value = 0xEDB88320u ^ (value >> 1);
+                }
+                else
+                {
+                    value >>= 1;
+                }
+            }
+            table[index] = value;
+        }
+        initialized = true;
+    }
+
+    quint32 crc = 0xFFFFFFFFu;
+    for (char byte : data)
+    {
+        crc = table[(crc ^ static_cast<quint8>(byte)) & 0xFFu] ^ (crc >> 8);
+    }
+
+    return crc ^ 0xFFFFFFFFu;
+}
+
+static bool inflateZipBlock(ZipBitReader *reader, const ZipHuffmanTree &literalTree,
+                            const ZipHuffmanTree &distanceTree, QByteArray *output,
+                            quint64 limit, QString *error)
+{
+    static const int lengthBase[29] = {
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
+        67, 83, 99, 115, 131, 163, 195, 227, 258};
+    static const int lengthExtra[29] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+        3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+    static const int distanceBase[30] = {
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+        257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
+    static const int distanceExtra[30] = {
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+        7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
+
+    while (true)
+    {
+        int symbol = 0;
+        if (!literalTree.decode(reader, &symbol))
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（字面量解码失败）");
+            }
+            return false;
+        }
+
+        if (symbol < 256)
+        {
+            if (static_cast<quint64>(output->size()) >= limit)
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("解压后的数据超出预期大小");
+                }
+                return false;
+            }
+
+            output->append(static_cast<char>(symbol));
+            continue;
+        }
+
+        if (symbol == 256)
+        {
+            return true;
+        }
+
+        if (symbol < 257 || symbol > 285)
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（长度编码无效）");
+            }
+            return false;
+        }
+
+        const int lengthIndex = symbol - 257;
+        quint32 extraValue = 0;
+        if (lengthExtra[lengthIndex] > 0 &&
+            !reader->readBits(lengthExtra[lengthIndex], &extraValue))
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（长度附加位缺失）");
+            }
+            return false;
+        }
+
+        const quint64 matchLength = static_cast<quint64>(lengthBase[lengthIndex]) + extraValue;
+        int distanceSymbol = 0;
+        if (!distanceTree.decode(reader, &distanceSymbol))
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（距离解码失败）");
+            }
+            return false;
+        }
+
+        if (distanceSymbol < 0 || distanceSymbol > 29)
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（距离编码无效）");
+            }
+            return false;
+        }
+
+        extraValue = 0;
+        if (distanceExtra[distanceSymbol] > 0 &&
+            !reader->readBits(distanceExtra[distanceSymbol], &extraValue))
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（距离附加位缺失）");
+            }
+            return false;
+        }
+
+        const quint64 matchDistance = static_cast<quint64>(distanceBase[distanceSymbol]) + extraValue;
+        if (matchDistance == 0 || matchDistance > static_cast<quint64>(output->size()))
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（回溯距离无效）");
+            }
+            return false;
+        }
+
+        if (static_cast<quint64>(output->size()) + matchLength > limit)
+        {
+            if (error)
+            {
+                *error = QStringLiteral("解压后的数据超出预期大小");
+            }
+            return false;
+        }
+
+        const qsizetype sourceIndex = output->size() - static_cast<qsizetype>(matchDistance);
+        for (quint64 index = 0; index < matchLength; ++index)
+        {
+            output->append(output->at(sourceIndex + static_cast<qsizetype>(index)));
+        }
+    }
+}
+
+static bool inflateZipDynamicTrees(ZipBitReader *reader, ZipHuffmanTree *literalTree,
+                                   ZipHuffmanTree *distanceTree, QString *error)
+{
+    quint32 literalCount = 0;
+    quint32 distanceCount = 0;
+    quint32 codeLengthCount = 0;
+    if (!reader->readBits(5, &literalCount) ||
+        !reader->readBits(5, &distanceCount) ||
+        !reader->readBits(4, &codeLengthCount))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("压缩数据损坏（动态树头部不完整）");
+        }
+        return false;
+    }
+
+    literalCount += 257;
+    distanceCount += 1;
+    codeLengthCount += 4;
+
+    static const int order[19] = {
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
+    QList<int> codeLengthLengths(19, 0);
+    for (quint32 index = 0; index < codeLengthCount; ++index)
+    {
+        quint32 value = 0;
+        if (!reader->readBits(3, &value))
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（码长表不完整）");
+            }
+            return false;
+        }
+        codeLengthLengths[order[index]] = static_cast<int>(value);
+    }
+
+    ZipHuffmanTree codeLengthTree;
+    if (!codeLengthTree.build(codeLengthLengths))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("压缩数据损坏（码长表无效）");
+        }
+        return false;
+    }
+
+    const int totalCount = static_cast<int>(literalCount + distanceCount);
+    QList<int> lengths;
+    lengths.reserve(totalCount);
+    while (lengths.size() < totalCount)
+    {
+        int symbol = 0;
+        if (!codeLengthTree.decode(reader, &symbol))
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（码长解码失败）");
+            }
+            return false;
+        }
+
+        if (symbol < 16)
+        {
+            lengths.append(symbol);
+        }
+        else if (symbol == 16)
+        {
+            if (lengths.isEmpty())
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("压缩数据损坏（重复码长没有前值）");
+                }
+                return false;
+            }
+
+            quint32 repeat = 0;
+            if (!reader->readBits(2, &repeat))
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("压缩数据损坏（重复码长不完整）");
+                }
+                return false;
+            }
+
+            const int previous = lengths.last();
+            const int count = static_cast<int>(repeat) + 3;
+            for (int index = 0; index < count; ++index)
+            {
+                lengths.append(previous);
+            }
+        }
+        else if (symbol == 17)
+        {
+            quint32 repeat = 0;
+            if (!reader->readBits(3, &repeat))
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("压缩数据损坏（零码长不完整）");
+                }
+                return false;
+            }
+
+            const int count = static_cast<int>(repeat) + 3;
+            for (int index = 0; index < count; ++index)
+            {
+                lengths.append(0);
+            }
+        }
+        else if (symbol == 18)
+        {
+            quint32 repeat = 0;
+            if (!reader->readBits(7, &repeat))
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("压缩数据损坏（长零码长不完整）");
+                }
+                return false;
+            }
+
+            const int count = static_cast<int>(repeat) + 11;
+            for (int index = 0; index < count; ++index)
+            {
+                lengths.append(0);
+            }
+        }
+        else
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（码长符号无效）");
+            }
+            return false;
+        }
+
+        if (lengths.size() > totalCount)
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（码长数量超出限制）");
+            }
+            return false;
+        }
+    }
+
+    const QList<int> literalLengths = lengths.mid(0, literalCount);
+    const QList<int> distanceLengths = lengths.mid(literalCount, distanceCount);
+    if (literalLengths.size() <= 256 || literalLengths.at(256) == 0)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("压缩数据损坏（缺少块结束码）");
+        }
+        return false;
+    }
+
+    if (!literalTree->build(literalLengths))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("压缩数据损坏（字面量树无效）");
+        }
+        return false;
+    }
+
+    if (!distanceTree->build(distanceLengths))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("压缩数据损坏（距离树无效）");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+static bool inflateZipData(const QByteArray &input, quint64 expectedSize,
+                           QByteArray *output, QString *error)
+{
+    output->clear();
+    output->reserve(static_cast<int>(expectedSize));
+
+    ZipBitReader reader(input);
+    bool finalBlock = false;
+    while (!finalBlock)
+    {
+        quint32 header = 0;
+        if (!reader.readBits(3, &header))
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据不完整");
+            }
+            return false;
+        }
+
+        finalBlock = (header & 1u) != 0;
+        const int blockType = static_cast<int>((header >> 1) & 3u);
+        if (blockType == 0)
+        {
+            reader.alignToByte();
+            quint32 length = 0;
+            quint32 complement = 0;
+            if (!reader.readBits(16, &length) || !reader.readBits(16, &complement))
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("压缩数据损坏（存储块头部不完整）");
+                }
+                return false;
+            }
+
+            if ((length ^ 0xFFFFu) != complement)
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("压缩数据损坏（存储块长度校验失败）");
+                }
+                return false;
+            }
+
+            QByteArray literal;
+            if (!reader.readBytes(static_cast<int>(length), &literal))
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("压缩数据损坏（存储块数据不完整）");
+                }
+                return false;
+            }
+
+            if (static_cast<quint64>(output->size()) + static_cast<quint64>(literal.size()) > expectedSize)
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("解压后的数据超出预期大小");
+                }
+                return false;
+            }
+
+            output->append(literal);
+        }
+        else if (blockType == 1)
+        {
+            QList<int> literalLengths(288, 0);
+            for (int index = 0; index < 144; ++index)
+            {
+                literalLengths[index] = 8;
+            }
+            for (int index = 144; index < 256; ++index)
+            {
+                literalLengths[index] = 9;
+            }
+            for (int index = 256; index < 280; ++index)
+            {
+                literalLengths[index] = 7;
+            }
+            for (int index = 280; index < 288; ++index)
+            {
+                literalLengths[index] = 8;
+            }
+
+            QList<int> distanceLengths(32, 5);
+            ZipHuffmanTree literalTree;
+            ZipHuffmanTree distanceTree;
+            if (!literalTree.build(literalLengths) || !distanceTree.build(distanceLengths))
+            {
+                if (error)
+                {
+                    *error = QStringLiteral("压缩数据损坏（固定哈夫曼树无效）");
+                }
+                return false;
+            }
+
+            if (!inflateZipBlock(&reader, literalTree, distanceTree, output, expectedSize, error))
+            {
+                return false;
+            }
+        }
+        else if (blockType == 2)
+        {
+            ZipHuffmanTree literalTree;
+            ZipHuffmanTree distanceTree;
+            if (!inflateZipDynamicTrees(&reader, &literalTree, &distanceTree, error))
+            {
+                return false;
+            }
+
+            if (!inflateZipBlock(&reader, literalTree, distanceTree, output, expectedSize, error))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (error)
+            {
+                *error = QStringLiteral("压缩数据损坏（块类型无效）");
+            }
+            return false;
+        }
+    }
+
+    if (static_cast<quint64>(output->size()) != expectedSize)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("解压后的数据大小与目录记录不一致");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+static void zipApplyZip64Extra(const QByteArray &extra, quint32 compressed32,
+                               quint32 uncompressed32, quint32 localOffset32,
+                               quint64 *compressedSize, quint64 *uncompressedSize,
+                               quint64 *localOffset)
+{
+    *compressedSize = compressed32;
+    *uncompressedSize = uncompressed32;
+    *localOffset = localOffset32;
+
+    qsizetype offset = 0;
+    while (offset + 4 <= extra.size())
+    {
+        const quint16 identifier = zipReadUInt16(extra, offset);
+        const quint16 size = zipReadUInt16(extra, offset + 2);
+        offset += 4;
+        if (offset + size > extra.size())
+        {
+            break;
+        }
+
+        if (identifier == 0x0001)
+        {
+            qsizetype fieldOffset = offset;
+            const qsizetype fieldEnd = offset + size;
+            if (uncompressed32 == 0xFFFFFFFFu && fieldOffset + 8 <= fieldEnd)
+            {
+                *uncompressedSize = zipReadUInt64(extra, fieldOffset);
+                fieldOffset += 8;
+            }
+            if (compressed32 == 0xFFFFFFFFu && fieldOffset + 8 <= fieldEnd)
+            {
+                *compressedSize = zipReadUInt64(extra, fieldOffset);
+                fieldOffset += 8;
+            }
+            if (localOffset32 == 0xFFFFFFFFu && fieldOffset + 8 <= fieldEnd)
+            {
+                *localOffset = zipReadUInt64(extra, fieldOffset);
+                fieldOffset += 8;
+            }
+            break;
+        }
+
+        offset += size;
+    }
+}
+
+static bool readZipArchive(const QString &filePath, QList<ZipArchiveEntry> *entries,
+                           QString *error)
+{
+    if (!entries)
+    {
+        return false;
+    }
+
+    entries->clear();
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("无法打开 ZIP 文件：%1").arg(file.errorString());
+        }
+        return false;
+    }
+
+    const qint64 fileSize = file.size();
+    if (fileSize < 22)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("不是有效的 ZIP 文件");
+        }
+        return false;
+    }
+
+    const qint64 tailSize = qMin<qint64>(fileSize, 65557 + 1024);
+    if (!file.seek(fileSize - tailSize))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("无法读取 ZIP 文件");
+        }
+        return false;
+    }
+
+    const QByteArray tail = file.read(tailSize);
+    if (tail.size() != tailSize)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("无法读取 ZIP 文件");
+        }
+        return false;
+    }
+
+    qint64 endOfCentralDirectoryIndex = -1;
+    for (qint64 index = tail.size() - 22; index >= 0; --index)
+    {
+        if (!zipHasSignature(tail, index, 0x06054B50u))
+        {
+            continue;
+        }
+
+        const quint16 commentLength = zipReadUInt16(tail, index + 20);
+        if (index + 22 + commentLength == tail.size())
+        {
+            endOfCentralDirectoryIndex = index;
+            break;
+        }
+    }
+
+    if (endOfCentralDirectoryIndex < 0)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("不是有效的 ZIP 文件（未找到中央目录结尾）");
+        }
+        return false;
+    }
+
+    const qint64 endOfCentralDirectoryOffset = fileSize - tailSize + endOfCentralDirectoryIndex;
+    const quint16 diskNumber = zipReadUInt16(tail, endOfCentralDirectoryIndex + 4);
+    const quint16 centralDirectoryDisk = zipReadUInt16(tail, endOfCentralDirectoryIndex + 6);
+    quint64 entryCount = zipReadUInt16(tail, endOfCentralDirectoryIndex + 10);
+    quint64 centralDirectorySize = zipReadUInt32(tail, endOfCentralDirectoryIndex + 12);
+    quint64 centralDirectoryOffset = zipReadUInt32(tail, endOfCentralDirectoryIndex + 16);
+
+    if (diskNumber != 0 || centralDirectoryDisk != 0)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("不支持分卷 ZIP 文件");
+        }
+        return false;
+    }
+
+    if (entryCount == 0xFFFFu || centralDirectorySize == 0xFFFFFFFFu ||
+        centralDirectoryOffset == 0xFFFFFFFFu)
+    {
+        bool zip64Read = false;
+        if (endOfCentralDirectoryOffset >= 20)
+        {
+            if (file.seek(endOfCentralDirectoryOffset - 20))
+            {
+                const QByteArray locator = file.read(20);
+                if (locator.size() == 20 && zipHasSignature(locator, 0, 0x07064B50u))
+                {
+                    const quint64 zip64Offset = zipReadUInt64(locator, 8);
+                    if (fileSize >= 56 &&
+                        zip64Offset <= static_cast<quint64>(fileSize) - 56 &&
+                        file.seek(static_cast<qint64>(zip64Offset)))
+                    {
+                        const QByteArray record = file.read(56);
+                        if (record.size() == 56 && zipHasSignature(record, 0, 0x06064B50u))
+                        {
+                            entryCount = zipReadUInt64(record, 32);
+                            centralDirectorySize = zipReadUInt64(record, 40);
+                            centralDirectoryOffset = zipReadUInt64(record, 48);
+                            zip64Read = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!zip64Read)
+        {
+            if (error)
+            {
+                *error = QStringLiteral("无法读取 ZIP64 目录信息");
+            }
+            return false;
+        }
+    }
+
+    if (entryCount > 100000)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("ZIP 文件中的条目数量过多");
+        }
+        return false;
+    }
+
+    if (centralDirectoryOffset > static_cast<quint64>(fileSize) ||
+        centralDirectorySize > static_cast<quint64>(fileSize) - centralDirectoryOffset)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("ZIP 中央目录位置无效");
+        }
+        return false;
+    }
+
+    if (centralDirectorySize > 128ull * 1024ull * 1024ull ||
+        !file.seek(static_cast<qint64>(centralDirectoryOffset)))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("无法读取 ZIP 中央目录");
+        }
+        return false;
+    }
+
+    const QByteArray centralDirectory = file.read(static_cast<qint64>(centralDirectorySize));
+    if (static_cast<quint64>(centralDirectory.size()) != centralDirectorySize)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("ZIP 中央目录不完整");
+        }
+        return false;
+    }
+
+    qsizetype offset = 0;
+    while (offset < centralDirectory.size())
+    {
+        if (offset + 46 > centralDirectory.size() ||
+            !zipHasSignature(centralDirectory, offset, 0x02014B50u))
+        {
+            if (error)
+            {
+                *error = QStringLiteral("ZIP 中央目录损坏");
+            }
+            return false;
+        }
+
+        ZipArchiveEntry entry;
+        entry.flags = zipReadUInt16(centralDirectory, offset + 8);
+        entry.method = zipReadUInt16(centralDirectory, offset + 10);
+        entry.crc32 = zipReadUInt32(centralDirectory, offset + 16);
+        const quint32 compressed32 = zipReadUInt32(centralDirectory, offset + 20);
+        const quint32 uncompressed32 = zipReadUInt32(centralDirectory, offset + 24);
+        const quint16 nameLength = zipReadUInt16(centralDirectory, offset + 28);
+        const quint16 extraLength = zipReadUInt16(centralDirectory, offset + 30);
+        const quint16 commentLength = zipReadUInt16(centralDirectory, offset + 32);
+        const quint32 localOffset32 = zipReadUInt32(centralDirectory, offset + 42);
+        const qsizetype entrySize = 46 + nameLength + extraLength + commentLength;
+        if (offset + entrySize > centralDirectory.size())
+        {
+            if (error)
+            {
+                *error = QStringLiteral("ZIP 中央目录条目不完整");
+            }
+            return false;
+        }
+
+        const QByteArray nameBytes = centralDirectory.mid(offset + 46, nameLength);
+        const QByteArray extra = centralDirectory.mid(offset + 46 + nameLength, extraLength);
+        if ((entry.flags & 0x0800u) != 0)
+        {
+            entry.name = QString::fromUtf8(nameBytes);
+        }
+        else
+        {
+            bool ascii = true;
+            for (char byte : nameBytes)
+            {
+                if (static_cast<quint8>(byte) >= 0x80u)
+                {
+                    ascii = false;
+                    break;
+                }
+            }
+
+            if (ascii)
+            {
+                entry.name = QString::fromLatin1(nameBytes);
+            }
+            else
+            {
+                QStringDecoder decoder(QStringConverter::Utf8);
+                const QString decoded = decoder.decode(nameBytes);
+                entry.name = decoder.hasError() ? QString::fromLocal8Bit(nameBytes) : decoded;
+            }
+        }
+
+        zipApplyZip64Extra(extra, compressed32, uncompressed32, localOffset32,
+                           &entry.compressedSize, &entry.uncompressedSize,
+                           &entry.localHeaderOffset);
+        entries->append(entry);
+        offset += entrySize;
+    }
+
+    if (entries->isEmpty())
+    {
+        if (error)
+        {
+            *error = QStringLiteral("ZIP 文件中没有文件");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+static bool readZipEntryData(QFile *file, const ZipArchiveEntry &entry,
+                             QByteArray *data, QString *error)
+{
+    if (!file || !data)
+    {
+        return false;
+    }
+
+    const quint64 maxEntrySize = 256ull * 1024ull * 1024ull;
+    if (entry.compressedSize > maxEntrySize || entry.uncompressedSize > maxEntrySize)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("单个文件超过 256 MB");
+        }
+        return false;
+    }
+
+    if ((entry.flags & 0x0001u) != 0)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("文件已加密");
+        }
+        return false;
+    }
+
+    if (entry.compressedSize > static_cast<quint64>(std::numeric_limits<int>::max()))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("压缩文件过大");
+        }
+        return false;
+    }
+
+    const quint64 fileSize = static_cast<quint64>(file->size());
+    if (entry.localHeaderOffset > fileSize || fileSize - entry.localHeaderOffset < 30)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("ZIP 本地文件头位置无效");
+        }
+        return false;
+    }
+
+    if (!file->seek(static_cast<qint64>(entry.localHeaderOffset)))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("无法读取 ZIP 本地文件头");
+        }
+        return false;
+    }
+
+    const QByteArray header = file->read(30);
+    if (header.size() != 30 || !zipHasSignature(header, 0, 0x04034B50u))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("ZIP 本地文件头损坏");
+        }
+        return false;
+    }
+
+    const quint16 nameLength = zipReadUInt16(header, 26);
+    const quint16 extraLength = zipReadUInt16(header, 28);
+    const quint64 dataOffset = entry.localHeaderOffset + 30ull + nameLength + extraLength;
+    if (dataOffset > fileSize || entry.compressedSize > fileSize - dataOffset)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("ZIP 文件数据位置无效");
+        }
+        return false;
+    }
+
+    if (!file->seek(static_cast<qint64>(dataOffset)))
+    {
+        if (error)
+        {
+            *error = QStringLiteral("无法读取 ZIP 文件数据");
+        }
+        return false;
+    }
+
+    const QByteArray compressed = file->read(static_cast<qint64>(entry.compressedSize));
+    if (static_cast<quint64>(compressed.size()) != entry.compressedSize)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("ZIP 文件数据不完整");
+        }
+        return false;
+    }
+
+    if (entry.method == 0)
+    {
+        if (entry.compressedSize != entry.uncompressedSize)
+        {
+            if (error)
+            {
+                *error = QStringLiteral("ZIP 存储块大小不一致");
+            }
+            return false;
+        }
+        *data = compressed;
+    }
+    else if (entry.method == 8)
+    {
+        if (!inflateZipData(compressed, entry.uncompressedSize, data, error))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        if (error)
+        {
+            *error = QStringLiteral("不支持的压缩方式（%1）").arg(entry.method);
+        }
+        return false;
+    }
+
+    if (static_cast<quint64>(data->size()) != entry.uncompressedSize)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("解压后的数据大小不一致");
+        }
+        return false;
+    }
+
+    if (zipCalculateCrc32(*data) != entry.crc32)
+    {
+        if (error)
+        {
+            *error = QStringLiteral("CRC 校验失败");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+static QString decodeZipTestText(const QByteArray &data)
+{
+    QByteArray bytes = data;
+    if (bytes.startsWith("\xEF\xBB\xBF"))
+    {
+        bytes.remove(0, 3);
+    }
+
+    QStringDecoder decoder(QStringConverter::Utf8);
+    QString text = decoder.decode(bytes);
+    if (decoder.hasError())
+    {
+        text = QString::fromLocal8Bit(bytes);
+    }
+
+    text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    text.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+    return text;
+}
+
+static bool loadTestsFromZip(const QString &zipPath, ZipImportResult *result,
+                             QString *errorMessage)
+{
+    if (!result)
+    {
+        return false;
+    }
+
+    *result = ZipImportResult();
+    QList<ZipArchiveEntry> entries;
+    QString error;
+    if (!readZipArchive(zipPath, &entries, &error))
+    {
+        if (errorMessage)
+        {
+            *errorMessage = error;
+        }
+        return false;
+    }
+
+    struct ZipNumberGroup
+    {
+        bool hasInput = false;
+        bool hasOutput = false;
+        bool hasAnswer = false;
+        ZipArchiveEntry input;
+        ZipArchiveEntry output;
+        ZipArchiveEntry answer;
+    };
+
+    QMap<quint64, ZipNumberGroup> groups;
+    const QRegularExpression digitPattern(QStringLiteral("^[0-9]+$"));
+    for (const ZipArchiveEntry &entry : entries)
+    {
+        QString name = entry.name;
+        name.replace(QLatin1Char('\\'), QLatin1Char('/'));
+        while (name.startsWith(QStringLiteral("./")))
+        {
+            name.remove(0, 2);
+        }
+        while (name.startsWith(QLatin1Char('/')))
+        {
+            name.remove(0, 1);
+        }
+
+        if (name.isEmpty() || name.endsWith(QLatin1Char('/')))
+        {
+            continue;
+        }
+
+        const QString baseName = name.section(QLatin1Char('/'), -1);
+        if (baseName.isEmpty() || baseName.startsWith(QStringLiteral("._")))
+        {
+            continue;
+        }
+
+        result->archivedFileCount += 1;
+        const int dotIndex = baseName.lastIndexOf(QLatin1Char('.'));
+        if (dotIndex <= 0 || dotIndex == baseName.size() - 1)
+        {
+            result->skippedFiles.append(name);
+            continue;
+        }
+
+        const QString stem = baseName.left(dotIndex);
+        const QString extension = baseName.mid(dotIndex + 1).toLower();
+        if (extension != QStringLiteral("in") && extension != QStringLiteral("out") &&
+            extension != QStringLiteral("ans"))
+        {
+            result->skippedFiles.append(name);
+            continue;
+        }
+
+        if (!digitPattern.match(stem).hasMatch())
+        {
+            result->skippedFiles.append(name);
+            continue;
+        }
+
+        bool numberOk = false;
+        const quint64 number = stem.toULongLong(&numberOk);
+        if (!numberOk)
+        {
+            result->skippedFiles.append(name);
+            continue;
+        }
+
+        ZipNumberGroup &group = groups[number];
+        if (extension == QStringLiteral("in"))
+        {
+            if (group.hasInput)
+            {
+                result->duplicateFiles.append(name);
+                continue;
+            }
+            group.hasInput = true;
+            group.input = entry;
+        }
+        else if (extension == QStringLiteral("out"))
+        {
+            if (group.hasOutput)
+            {
+                result->duplicateFiles.append(name);
+                continue;
+            }
+            group.hasOutput = true;
+            group.output = entry;
+        }
+        else
+        {
+            if (group.hasAnswer)
+            {
+                result->duplicateFiles.append(name);
+                continue;
+            }
+            group.hasAnswer = true;
+            group.answer = entry;
+        }
+    }
+
+    QFile file(zipPath);
+    if (!file.open(QIODevice::ReadOnly))
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QStringLiteral("无法打开 ZIP 文件：%1").arg(file.errorString());
+        }
+        return false;
+    }
+
+    const quint64 maxTotalSize = 512ull * 1024ull * 1024ull;
+    quint64 totalSize = 0;
+    for (auto iterator = groups.constBegin(); iterator != groups.constEnd(); ++iterator)
+    {
+        const ZipNumberGroup &group = iterator.value();
+        if (!group.hasInput)
+        {
+            if (group.hasOutput)
+            {
+                result->orphanAnswerFiles.append(group.output.name);
+            }
+            if (group.hasAnswer)
+            {
+                result->orphanAnswerFiles.append(group.answer.name);
+            }
+            continue;
+        }
+
+        QByteArray inputData;
+        if (!readZipEntryData(&file, group.input, &inputData, &error))
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QStringLiteral("读取 %1 失败：%2").arg(group.input.name, error);
+            }
+            return false;
+        }
+
+        QByteArray answerData;
+        const ZipArchiveEntry *answerEntry = nullptr;
+        if (group.hasOutput)
+        {
+            answerEntry = &group.output;
+        }
+        else if (group.hasAnswer)
+        {
+            answerEntry = &group.answer;
+        }
+
+        if (answerEntry)
+        {
+            if (!readZipEntryData(&file, *answerEntry, &answerData, &error))
+            {
+                if (errorMessage)
+                {
+                    *errorMessage = QStringLiteral("读取 %1 失败：%2").arg(answerEntry->name, error);
+                }
+                return false;
+            }
+        }
+
+        totalSize += static_cast<quint64>(inputData.size());
+        totalSize += static_cast<quint64>(answerData.size());
+        if (totalSize > maxTotalSize)
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QStringLiteral("测试数据总大小超过 512 MB");
+            }
+            return false;
+        }
+
+        ZipTestSample sample;
+        sample.input = decodeZipTestText(inputData);
+        sample.answer = answerEntry ? decodeZipTestText(answerData) : QString();
+        sample.inputFileName = group.input.name;
+        sample.answerFileName = answerEntry ? answerEntry->name : QString();
+        result->samples.append(sample);
+
+        if (!answerEntry)
+        {
+            result->missingAnswerNumbers.append(QString::number(iterator.key()));
+        }
+    }
+
+    if (result->samples.isEmpty())
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QStringLiteral("压缩包中没有找到可导入的测试点（需要形如 1.in 与 1.out 或 1.ans 的文件）");
+        }
+        return false;
+    }
+
+    return true;
+}
+}
+
+void CompilerIDE::importTestsFromZip()
+{
+    if (isSilentCompiling || isRunningAllTests || testWarmupProcess ||
+        (testTimer && testTimer->isActive()) ||
+        (testProcess && testProcess->state() != QProcess::NotRunning))
+    {
+        QMessageBox::warning(this, tr("提示"), tr("数据评测器正在运行，请结束评测后再导入测试点"));
+        return;
+    }
+
+    QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
+    const QString initialDirectory =
+        settings.value("SampleTester/LastZipDirectory", QDir::homePath()).toString();
+    const QString zipPath = QFileDialog::getOpenFileName(
+        this, tr("从 ZIP 导入测试点"), initialDirectory,
+        tr("ZIP 压缩包 (*.zip *.ZIP);;所有文件 (*.*)"));
+    if (zipPath.isEmpty())
+    {
+        return;
+    }
+
+    ZipImportResult importResult;
+    QString errorMessage;
+    if (!loadTestsFromZip(zipPath, &importResult, &errorMessage))
+    {
+        QMessageBox::warning(this, tr("导入失败"), errorMessage);
+        return;
+    }
+
+    if (!testCaseWidgets.isEmpty())
+    {
+        const QMessageBox::StandardButton choice = QMessageBox::question(
+            this, tr("确认导入"),
+            tr("导入将覆盖数据评测器中现有的 %1 个测试点，是否继续？").arg(testCaseWidgets.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (choice != QMessageBox::Yes)
+        {
+            return;
+        }
+    }
+
+    QList<QPair<QString, QString>> samples;
+    samples.reserve(importResult.samples.size());
+    for (const ZipTestSample &sample : importResult.samples)
+    {
+        samples.append(qMakePair(sample.input, sample.answer));
+    }
+
+    importSamplesIntoTester(samples);
+    settings.setValue("SampleTester/LastZipDirectory", QFileInfo(zipPath).absolutePath());
+
+    const QString summary = tr("已从 ZIP 导入 %1 个测试点").arg(samples.size());
+    statusBar()->showMessage(summary, 6000);
+    showFloatingMessage(summary, 3500, false);
+    if (outputEdit)
+    {
+        outputEdit->appendPlainText(tr("[ZIP 导入] %1").arg(summary));
+    }
+
+    QStringList details;
+    if (!importResult.missingAnswerNumbers.isEmpty())
+    {
+        const QStringList numbers = importResult.missingAnswerNumbers;
+        const QStringList displayed = numbers.mid(0, 10);
+        QString text = displayed.join(QStringLiteral("、"));
+        if (numbers.size() > displayed.size())
+        {
+            text += tr(" 等");
+        }
+        details.append(tr("以下编号缺少答案文件，已按空答案导入：%1").arg(text));
+    }
+
+    if (!importResult.orphanAnswerFiles.isEmpty())
+    {
+        details.append(
+            tr("已忽略 %1 个没有对应输入文件的答案文件").arg(importResult.orphanAnswerFiles.size()));
+    }
+
+    if (!importResult.duplicateFiles.isEmpty())
+    {
+        details.append(tr("已忽略 %1 个重复文件").arg(importResult.duplicateFiles.size()));
+    }
+
+    if (!details.isEmpty())
+    {
+        QMessageBox::information(this, tr("ZIP 导入完成"),
+                                 summary + QStringLiteral("\n\n") + details.join(QStringLiteral("\n")));
+    }
 }
 
 bool CompilerIDE::importCompetitiveCompanionProblem(const QJsonObject &problem,
@@ -24842,7 +33112,7 @@ void CompilerIDE::createSampleTesterDock()
     companionActionsLayout->addWidget(competitiveCompanionOpenProblemButton);
     companionActionsLayout->addWidget(retryCompanionButton);
 
-    companionDetailsLayout->addWidget(competitiveCompanionProblemLabel);
+companionDetailsLayout->addWidget(competitiveCompanionProblemLabel);
     companionDetailsLayout->addLayout(companionActionsLayout);
     companionPanelLayout->addWidget(competitiveCompanionDetailsWidget);
     updateCompetitiveCompanionPanelStyle(darkTheme);
@@ -24928,12 +33198,30 @@ void CompilerIDE::createSampleTesterDock()
 
     addTestBtn = new QPushButton(tr("添加测试点"));
     addTestBtn->setObjectName("sampleAddButton");
+    addTestBtn->setText(QString());
+    addTestBtn->setFixedSize(34, 34);
+    addTestBtn->setCursor(Qt::PointingHandCursor);
+    addTestBtn->setIconSize(QSize(18, 18));
+    addTestBtn->setToolTip(tr("添加测试点"));
+    addTestBtn->setAccessibleName(tr("添加测试点"));
+    addTestBtn->setIcon(QIcon(sampleTesterAddTestPointIconPath(themeMode)));
     runAllTestsBtn = new QPushButton(tr("评测所有测试点"));
     runAllTestsBtn->setObjectName("sampleRunAllButton");
+
+    importTestsFromZipBtn = new QPushButton();
+    importTestsFromZipBtn->setObjectName("sampleImportButton");
+    importTestsFromZipBtn->setFixedSize(34, 34);
+    importTestsFromZipBtn->setCursor(Qt::PointingHandCursor);
+    importTestsFromZipBtn->setIconSize(QSize(18, 18));
+    importTestsFromZipBtn->setToolTip(
+        tr("从 ZIP 压缩包导入测试点（支持 in/out 或 in/ans）"));
+    importTestsFromZipBtn->setAccessibleName(tr("从 ZIP 导入测试点"));
+    importTestsFromZipBtn->setIcon(QIcon(sampleTesterZipImportIconPath(darkTheme)));
 
     controlLayout->addWidget(timeLimitLabel);
     controlLayout->addWidget(timeLimitEditor);
     controlLayout->addStretch();
+    controlLayout->addWidget(importTestsFromZipBtn);
     controlLayout->addWidget(addTestBtn);
     controlLayout->addWidget(runAllTestsBtn);
 
@@ -24981,6 +33269,7 @@ void CompilerIDE::createSampleTesterDock()
     sampleTesterDock->hide();
 
     connect(addTestBtn, &QPushButton::clicked, this, &CompilerIDE::addTestCase);
+    connect(importTestsFromZipBtn, &QPushButton::clicked, this, &CompilerIDE::importTestsFromZip);
     connect(runAllTestsBtn, &QPushButton::clicked, this, &CompilerIDE::runAllTests);
 }
 
@@ -25841,7 +34130,7 @@ void CompilerIDE::runTest(int index)
         return;
     }
 
-    QString input = inputEdit->toPlainText();
+QString input = inputEdit->toPlainText();
 
     QString inputFilePath = QDir::temp().filePath(QString("test_input_%1.txt").arg(index));
     QFile inputFile(inputFilePath);
@@ -26475,10 +34764,486 @@ void CompilerIDE::loadFile(const QString &fileName)
         return;
     }
 
-    int index = findEditor(fileName);
+    if (QFileInfo(fileName).suffix().toLower() == "md" ||
+        QFileInfo(fileName).suffix().toLower() == "markdown")
+    {
+        loadMarkdownFile(fileName);
+        return;
+    }
+
+    int index = findEditorByFilePath(fileName);
     if (index >= 0)
     {
         tabWidget->setCurrentIndex(index);
+        return;
+    }
+
+    QFileInfo asyncFileInfo(fileName);
+    constexpr qint64 largeFileThreshold = 512 * 1024;
+
+    if (asyncFileInfo.exists() &&
+        asyncFileInfo.isFile() &&
+        asyncFileInfo.size() > largeFileThreshold)
+    {
+        QSettings settings("CompilerIDE", "Compiler IDE 2.8.6");
+        QString fileKey = "file_" + asyncFileInfo.absoluteFilePath() + "_isEasyX";
+        bool isEasyX = settings.value(fileKey, false).toBool();
+
+        CodeEditor *editor = new CodeEditor;
+        editor->beginLargeFileLoad();
+        editor->setAutoBracketsEnabled(autoBrackets);
+        editor->setAutoQuotesEnabled(autoQuotes);
+        editor->setCodeBeautifyEnabled(codeBeautify);
+        editor->setCompletionEnabled(codeCompletionEnabled);
+        editor->setCompletionAcceptMode(completionAcceptMode);
+        editor->setIndentationMode(indentationMode);
+        editor->setEditorFont(editorFont);
+        editor->setAutoIndentEnabled(autoIndent);
+        editor->setShowIndentGuides(settings.value("showIndentGuides", true).toBool());
+        editor->setIndentSize(indentSize);
+        editor->setCodeFoldingEnabled(codeFolding);
+        editor->setLineNumbersEnabled(lineNumbers);
+        new CppHighlighter(editor->document());
+        editor->setThemeMode(themeMode);
+
+        if (codeCompletionEnabled)
+        {
+            editor->setCompletionEnabled(true);
+            editor->setCompetitionMode(false);
+        }
+        else
+        {
+            editor->setCompletionEnabled(false);
+            editor->setCompetitionMode(true);
+        }
+
+        if (competitionMode && comp_disableCodeCompletion)
+        {
+            editor->disableAllCompletion();
+        }
+
+        editorEasyXFlags[editor] = isEasyX;
+        editorEncodings[editor] = "UTF-8";
+
+        connect(editor, &CodeEditor::breakpointToggled, this,
+                [this, fileName](int line, bool added)
+                {
+                    QTimer::singleShot(0, this,
+                                       [this, fileName, line, added]()
+                                       {
+                                           if (!debugger)
+                                           {
+                                               qWarning() << "Debugger not initialized";
+                                               return;
+                                           }
+
+                                           if (added)
+                                           {
+                                               debugger->setBreakpoint(fileName, line);
+                                               outputEdit->appendPlainText(
+                                                   tr("断点已添加: %1:%2").arg(fileName).arg(line));
+                                           }
+                                           else
+                                           {
+                                               debugger->removeBreakpoint(fileName, line);
+                                               outputEdit->appendPlainText(
+                                                   tr("断点已移除: %1:%2").arg(fileName).arg(line));
+                                           }
+                                       });
+                });
+
+        connect(editor, &CodeEditor::fontSizeChanged,
+                this, &CompilerIDE::onEditorFontSizeChanged);
+
+        connect(editor, &CodeEditor::cursorPositionChanged,
+                this, &CompilerIDE::updateStatusBar);
+
+        QString tabTitle = strippedName(fileName);
+        if (isEasyX)
+        {
+            tabTitle += " [EasyX]";
+        }
+
+        int tabIndex = tabWidget->addTab(editor, tabTitle);
+        tabWidget->setTabToolTip(tabIndex, fileName);
+        tabWidget->setCurrentIndex(tabIndex);
+        setCurrentFile(fileName);
+        statusBar()->showMessage(tr("正在后台加载大文件..."));
+
+        QPointer<CompilerIDE> ideGuard(this);
+        QPointer<CodeEditor> editorGuard(editor);
+
+        QThread *loaderThread = QThread::create(
+            [ideGuard, editorGuard, fileName, isEasyX]()
+            {
+                QFile file(fileName);
+                QString errorString;
+
+                if (!file.open(QFile::ReadOnly))
+                {
+                    errorString = file.errorString();
+                    QMetaObject::invokeMethod(
+                        qApp,
+                        [ideGuard, editorGuard, fileName, errorString]()
+                        {
+                            if (!ideGuard)
+                            {
+                                return;
+                            }
+
+                            if (editorGuard)
+                            {
+                                int failedIndex = ideGuard->tabWidget->indexOf(editorGuard.data());
+                                if (failedIndex >= 0)
+                                {
+                                    ideGuard->tabWidget->removeTab(failedIndex);
+                                }
+                                editorGuard->deleteLater();
+                            }
+
+                            QMessageBox::warning(
+                                ideGuard.data(),
+                                ideGuard->tr("Compiler IDE"),
+                                ideGuard->tr("无法读取文件 %1:\n%2.")
+                                    .arg(QDir::toNativeSeparators(fileName), errorString));
+                        },
+                        Qt::QueuedConnection);
+                    return;
+                }
+
+                QByteArray data = file.readAll();
+                file.close();
+
+                QString content;
+                QString detectedEncoding = "UTF-8";
+
+                auto isValidUtf8 = [](const QByteArray &bytesData) -> bool
+                {
+                    const unsigned char *bytes =
+                        reinterpret_cast<const unsigned char *>(bytesData.constData());
+                    int len = bytesData.size();
+                    int i = 0;
+
+                    if (len >= 3 &&
+                        bytes[0] == 0xEF &&
+                        bytes[1] == 0xBB &&
+                        bytes[2] == 0xBF)
+                    {
+                        i = 3;
+                    }
+
+                    while (i < len)
+                    {
+                        unsigned char c = bytes[i];
+
+                        if (c <= 0x7F)
+                        {
+                            ++i;
+                        }
+                        else if (c >= 0xC2 && c <= 0xDF)
+                        {
+                            if (i + 1 >= len ||
+                                (bytes[i + 1] & 0xC0) != 0x80)
+                            {
+                                return false;
+                            }
+                            i += 2;
+                        }
+                        else if (c >= 0xE0 && c <= 0xEF)
+                        {
+                            if (i + 2 >= len ||
+                                (bytes[i + 1] & 0xC0) != 0x80 ||
+                                (bytes[i + 2] & 0xC0) != 0x80)
+                            {
+                                return false;
+                            }
+                            if (c == 0xE0 && bytes[i + 1] < 0xA0)
+                            {
+                                return false;
+                            }
+                            i += 3;
+                        }
+                        else if (c >= 0xF0 && c <= 0xF4)
+                        {
+                            if (i + 3 >= len ||
+                                (bytes[i + 1] & 0xC0) != 0x80 ||
+                                (bytes[i + 2] & 0xC0) != 0x80 ||
+                                (bytes[i + 3] & 0xC0) != 0x80)
+                            {
+                                return false;
+                            }
+                            if (c == 0xF0 && bytes[i + 1] < 0x90)
+                            {
+                                return false;
+                            }
+                            if (c == 0xF4 && bytes[i + 1] > 0x8F)
+                            {
+                                return false;
+                            }
+                            i += 4;
+                        }
+                        else
+                        {
+                            return false;
+                        }
+                    }
+
+                    return true;
+                };
+
+                QFileInfo fileInfo(fileName);
+                QString ext = fileInfo.suffix().toLower();
+                QStringList gbkPriorityExts = {"nsi", "nsh", "bat", "cmd", "ini", "rc"};
+                bool preferGBK = gbkPriorityExts.contains(ext);
+
+                if (data.startsWith("\xEF\xBB\xBF"))
+                {
+                    content = QString::fromUtf8(data.mid(3));
+                    detectedEncoding = "UTF-8-BOM";
+                }
+                else if (data.startsWith("\xFF\xFE"))
+                {
+                    content = QString::fromUtf16(
+                        reinterpret_cast<const char16_t *>(data.constData() + 2),
+                        (data.size() - 2) / 2);
+                    detectedEncoding = "UTF-16LE";
+                }
+                else if (data.startsWith("\xFE\xFF"))
+                {
+                    QByteArray swapped;
+                    swapped.reserve(data.size() - 2);
+
+                    for (int i = 2; i + 1 < data.size(); i += 2)
+                    {
+                        swapped.append(data[i + 1]);
+                        swapped.append(data[i]);
+                    }
+
+                    content = QString::fromUtf16(
+                        reinterpret_cast<const char16_t *>(swapped.constData()),
+                        swapped.size() / 2);
+                    detectedEncoding = "UTF-16BE";
+                }
+                else if (preferGBK)
+                {
+                    QStringDecoder gbkDecoder("GBK");
+                    if (gbkDecoder.isValid())
+                    {
+                        content = gbkDecoder.decode(data);
+                        detectedEncoding = "GBK";
+                    }
+                    else
+                    {
+                        content = QString::fromLocal8Bit(data);
+                        detectedEncoding = "Local8Bit";
+                    }
+                }
+                else if (isValidUtf8(data))
+                {
+                    content = QString::fromUtf8(data);
+                    detectedEncoding = "UTF-8";
+                }
+                else
+                {
+                    QStringDecoder gbkDecoder("GBK");
+                    if (gbkDecoder.isValid())
+                    {
+                        content = gbkDecoder.decode(data);
+                        detectedEncoding = "GBK";
+                    }
+                    else
+                    {
+                        content = QString::fromLocal8Bit(data);
+                        detectedEncoding = "Local8Bit";
+                    }
+                }
+
+                QByteArray fileHash =
+                    QCryptographicHash::hash(data, QCryptographicHash::Sha1);
+                fileInfo.refresh();
+                qint64 fileSize = fileInfo.size();
+                qint64 modifiedTime = fileInfo.lastModified().toMSecsSinceEpoch();
+
+                QMetaObject::invokeMethod(
+                    qApp,
+                    [ideGuard,
+                     editorGuard,
+                     fileName,
+                     isEasyX,
+                     content = std::move(content),
+                     detectedEncoding,
+                     fileHash,
+                     fileSize,
+                     modifiedTime]() mutable
+                    {
+                        if (!ideGuard || !editorGuard)
+                        {
+                            return;
+                        }
+
+                        ideGuard->editorEncodings[editorGuard.data()] = detectedEncoding;
+
+                        QTimer *chunkTimer = new QTimer(editorGuard.data());
+                        chunkTimer->setInterval(0);
+
+                        QObject::connect(
+                            chunkTimer,
+                            &QTimer::timeout,
+                            editorGuard.data(),
+                            [ideGuard,
+                             editorGuard,
+                             chunkTimer,
+                             fileName,
+                             isEasyX,
+                             content = std::move(content),
+                             detectedEncoding,
+                             fileHash,
+                             fileSize,
+                             modifiedTime,
+                             offset = 0]() mutable
+                            {
+                                if (!ideGuard || !editorGuard)
+                                {
+                                    chunkTimer->stop();
+                                    chunkTimer->deleteLater();
+                                    return;
+                                }
+
+                                constexpr int chunkCharacters = 4096;
+                                constexpr qint64 timeBudgetMilliseconds = 4;
+                                QElapsedTimer timeBudget;
+                                timeBudget.start();
+
+                                while (offset < content.size() &&
+                                       timeBudget.elapsed() < timeBudgetMilliseconds)
+                                {
+                                    int chunkEnd =
+                                        qMin(offset + chunkCharacters, content.size());
+
+                                    if (chunkEnd < content.size())
+                                    {
+                                        const int newlineIndex =
+                                            content.lastIndexOf(QChar('\n'), chunkEnd - 1);
+
+                                        if (newlineIndex >= offset)
+                                        {
+                                            chunkEnd = newlineIndex + 1;
+                                        }
+                                    }
+
+                                    if (chunkEnd < content.size() &&
+                                        chunkEnd > offset &&
+                                        content.at(chunkEnd - 1) == QChar('\r') &&
+                                        content.at(chunkEnd) == QChar('\n'))
+                                    {
+                                        --chunkEnd;
+                                    }
+
+                                    if (chunkEnd < content.size() &&
+                                        chunkEnd > offset &&
+                                        content.at(chunkEnd - 1).isHighSurrogate() &&
+                                        content.at(chunkEnd).isLowSurrogate())
+                                    {
+                                        --chunkEnd;
+                                    }
+
+                                    if (chunkEnd <= offset)
+                                    {
+                                        chunkEnd = qMin(offset + chunkCharacters, content.size());
+                                    }
+
+                                    editorGuard->appendLargeFileChunk(
+                                        content.mid(offset, chunkEnd - offset));
+                                    offset = chunkEnd;
+                                }
+
+                                if (offset < content.size())
+                                {
+                                    return;
+                                }
+
+                                chunkTimer->stop();
+                                chunkTimer->deleteLater();
+
+                                editorGuard->endLargeFileLoad();
+                                editorGuard->document()->setModified(false);
+
+                                QObject::connect(
+                                    editorGuard.data(),
+                                    &CodeEditor::plainTextChanged,
+                                    ideGuard.data(),
+                                    &CompilerIDE::documentWasModified,
+                                    Qt::UniqueConnection);
+
+                                QString normalizedPath =
+                                    ideGuard->normalizedWatchPath(fileName);
+
+                                if (ideGuard->fileSystemWatcher &&
+                                    !normalizedPath.isEmpty() &&
+                                    !ideGuard->fileSystemWatcher->files().contains(normalizedPath))
+                                {
+                                    ideGuard->fileSystemWatcher->addPath(normalizedPath);
+                                }
+
+                                if (!normalizedPath.isEmpty())
+                                {
+                                    ideGuard->watchedFileModifiedTimes[normalizedPath] =
+                                        modifiedTime;
+                                    ideGuard->watchedFileSizes[normalizedPath] = fileSize;
+                                    ideGuard->watchedFileHashes[normalizedPath] = fileHash;
+                                }
+
+                                ideGuard->addToRecentFiles(fileName);
+
+                                if (ideGuard->m_lspAvailable &&
+                                    ideGuard->m_lspClient)
+                                {
+                                    QString dir = QFileInfo(fileName).absolutePath();
+                                    ideGuard->ensureCompileFlags(dir, isEasyX);
+                                    ideGuard->sendOpenToLSP(editorGuard.data(), fileName);
+
+                                    QObject::connect(
+                                        editorGuard.data(),
+                                        &QPlainTextEdit::textChanged,
+                                        ideGuard.data(),
+                                        [ideGuard, editorGuard]()
+                                        {
+                                            if (!ideGuard || !editorGuard)
+                                            {
+                                                return;
+                                            }
+
+                                            if (ideGuard->m_lspDebounceTimer)
+                                            {
+                                                ideGuard->m_pendingLSPEditor =
+                                                    editorGuard.data();
+                                                ideGuard->m_lspDebounceTimer->start(300);
+                                            }
+                                        });
+                                }
+
+                                if (ideGuard->currentEditor() == editorGuard.data())
+                                {
+                                    ideGuard->updateStatusBar();
+                                }
+
+                                ideGuard->statusBar()->showMessage(
+                                    ideGuard->tr("文件已加载"), 2000);
+
+                                qDebug() << "文件编码检测:"
+                                         << fileName
+                                         << "编码="
+                                         << detectedEncoding;
+                            });
+
+                        chunkTimer->start();
+                    },
+                    Qt::QueuedConnection);
+            });
+
+        connect(loaderThread, &QThread::finished,
+                loaderThread, &QObject::deleteLater);
+        loaderThread->start();
         return;
     }
 
@@ -26663,6 +35428,8 @@ void CompilerIDE::loadFile(const QString &fileName)
     editor->setAutoQuotesEnabled(autoQuotes);
     editor->setCodeBeautifyEnabled(codeBeautify);
     editor->setCompletionEnabled(codeCompletionEnabled);
+    editor->setCompletionAcceptMode(completionAcceptMode);
+    editor->setIndentationMode(indentationMode);
     qDebug() << "[newFile/loadFile] 即将设置 editorFont:" << editorFont.family() << editorFont.pointSize();
     editor->setEditorFont(editorFont);
     editor->setAutoIndentEnabled(autoIndent);
@@ -26722,7 +35489,7 @@ void CompilerIDE::loadFile(const QString &fileName)
     connect(editor, &CodeEditor::fontSizeChanged,
             this, &CompilerIDE::onEditorFontSizeChanged);
 
-    connect(editor->document(), &QTextDocument::contentsChanged,
+    connect(editor, &CodeEditor::plainTextChanged,
             this, &CompilerIDE::documentWasModified);
 
     connect(editor, &CodeEditor::cursorPositionChanged,
@@ -26758,6 +35525,99 @@ void CompilerIDE::loadFile(const QString &fileName)
     statusBar()->showMessage(tr("文件已加载"), 2000);
 }
 
+void CompilerIDE::loadMarkdownFile(const QString &fileName)
+{
+    int index = findEditorByFilePath(fileName);
+    if (index >= 0)
+    {
+        tabWidget->setCurrentIndex(index);
+        return;
+    }
+
+    QFile file(fileName);
+    if (!file.open(QFile::ReadOnly | QFile::Text))
+    {
+        QMessageBox::warning(this, tr("Compiler IDE"),
+                             tr("无法读取文件 %1:\n%2.")
+                                 .arg(QDir::toNativeSeparators(fileName),
+                                      file.errorString()));
+        return;
+    }
+
+    QString content = QString::fromUtf8(file.readAll());
+    file.close();
+
+    MarkdownEditor *mdEditor = new MarkdownEditor(this);
+    mdEditor->setPlainText(content);
+    mdEditor->setDocumentModified(false);
+
+    m_markdownFilePaths[mdEditor] = fileName;
+
+    connect(mdEditor, &MarkdownEditor::textChanged,
+            this, &CompilerIDE::documentWasModified);
+
+    QString tabTitle = strippedName(fileName);
+    int tabIndex = tabWidget->addTab(mdEditor, tabTitle);
+    tabWidget->setTabToolTip(tabIndex, fileName);
+    tabWidget->setCurrentIndex(tabIndex);
+
+    setCurrentFile(fileName);
+    watchOpenedFile(fileName);
+    addToRecentFiles(fileName);
+    statusBar()->showMessage(tr("Markdown 文件已加载"), 2000);
+}
+
+bool CompilerIDE::saveMarkdownFile(MarkdownEditor *editor, const QString &fileName)
+{
+    if (!editor)
+    {
+        return false;
+    }
+
+    QSaveFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly))
+    {
+        QMessageBox::warning(this, tr("Compiler IDE"),
+                             tr("无法写入文件 %1:\n%2.")
+                                 .arg(QDir::toNativeSeparators(fileName), file.errorString()));
+        return false;
+    }
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const QByteArray contents = editor->toPlainText().toUtf8();
+    const bool written = file.write(contents) == contents.size() && file.flush();
+    const bool saved = written && file.commit();
+    const QString error = file.errorString();
+    if (!saved)
+    {
+        file.cancelWriting();
+    }
+    QApplication::restoreOverrideCursor();
+
+    if (!saved)
+    {
+        QMessageBox::warning(this, tr("Compiler IDE"),
+                             tr("保存 Markdown 文件失败 %1:\n%2")
+                                 .arg(QDir::toNativeSeparators(fileName), error));
+        return false;
+    }
+
+    editor->setDocumentModified(false);
+
+    int index = tabWidget->indexOf(editor);
+    if (index >= 0)
+    {
+        QString tabTitle = strippedName(fileName);
+        tabWidget->setTabText(index, tabTitle);
+        tabWidget->setTabToolTip(index, fileName);
+    }
+
+    m_markdownFilePaths[editor] = fileName;
+    setCurrentFile(fileName);
+    watchOpenedFile(fileName);
+    statusBar()->showMessage(tr("Markdown 文件已保存"), 2000);
+    return true;
+}
 
 QString CompilerIDE::normalizedWatchPath(const QString &filePath) const
 {
@@ -26793,7 +35653,7 @@ int CompilerIDE::findEditorByFilePath(const QString &filePath) const
     return -1;
 }
 
-void CompilerIDE::watchOpenedFile(const QString &filePath)
+void CompilerIDE::watchOpenedFile(const QString &filePath, const QByteArray &knownHash)
 {
     if (!fileSystemWatcher)
     {
@@ -26816,12 +35676,19 @@ void CompilerIDE::watchOpenedFile(const QString &filePath)
     watchedFileModifiedTimes[normalizedPath] = info.lastModified().toMSecsSinceEpoch();
     watchedFileSizes[normalizedPath] = info.size();
 
-    QFile file(normalizedPath);
-    if (file.open(QFile::ReadOnly))
+    if (!knownHash.isNull())
     {
-        watchedFileHashes[normalizedPath] = QCryptographicHash::hash(
-            file.readAll(), QCryptographicHash::Sha1);
-        file.close();
+        watchedFileHashes[normalizedPath] = knownHash;
+    }
+    else
+    {
+        QFile file(normalizedPath);
+        if (file.open(QFile::ReadOnly))
+        {
+            watchedFileHashes[normalizedPath] = QCryptographicHash::hash(
+                file.readAll(), QCryptographicHash::Sha1);
+            file.close();
+        }
     }
 }
 
@@ -27103,6 +35970,17 @@ bool CompilerIDE::saveFile(const QString &fileName)
     CodeEditor *editor = currentEditor();
     if (!editor)
     {
+        MarkdownEditor *mdEditor = qobject_cast<MarkdownEditor *>(tabWidget->currentWidget());
+        if (mdEditor)
+        {
+            return saveMarkdownFile(mdEditor, fileName);
+        }
+        return false;
+    }
+
+    if (editor->isLargeFileLoading())
+    {
+        statusBar()->showMessage(tr("大文件仍在加载，请稍候再保存"), 2000);
         return false;
     }
 
@@ -27115,8 +35993,8 @@ bool CompilerIDE::saveFile(const QString &fileName)
         fileSystemWatcher->removePath(watchedPath);
     }
 
-    QFile file(fileName);
-    if (!file.open(QFile::WriteOnly | QFile::Text))
+    QSaveFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly))
     {
         QMessageBox::warning(this, tr("Compiler IDE"),
                              tr("无法写入文件 %1:\n%2.")
@@ -27173,10 +36051,25 @@ bool CompilerIDE::saveFile(const QString &fileName)
         encodedData = content.toUtf8();
     }
 
-    file.write(encodedData);
-    file.flush();
+    const bool written = file.write(encodedData) == encodedData.size() && file.flush();
+    const bool saved = written && file.commit();
+    const QString saveError = file.errorString();
+    if (!saved)
+    {
+        file.cancelWriting();
+    }
     QApplication::restoreOverrideCursor();
-    file.close();
+    if (!saved)
+    {
+        if (wasWatched && fileSystemWatcher)
+        {
+            fileSystemWatcher->addPath(watchedPath);
+        }
+        QMessageBox::warning(this, tr("Compiler IDE"),
+                             tr("文件保存失败 %1:\n%2")
+                                 .arg(QDir::toNativeSeparators(fileName), saveError));
+        return false;
+    }
     setCurrentFile(fileName);
 
     if (!previousFilePath.isEmpty() &&
@@ -27184,7 +36077,7 @@ bool CompilerIDE::saveFile(const QString &fileName)
     {
         unwatchFileIfUnused(previousFilePath, editor);
     }
-    watchOpenedFile(fileName);
+    watchOpenedFile(fileName, QCryptographicHash::hash(encodedData, QCryptographicHash::Sha1));
 
     if (currentIndex >= 0)
     {
@@ -27287,7 +36180,38 @@ void CompilerIDE::newFile()
         return;
     }
 
-    bool isEasyX = dialog.isEasyX();
+    createNewFile(dialog.getSelectedFileType());
+}
+
+void CompilerIDE::createNewFile(NewFileDialog::FileType fileType)
+{
+    if (fileType == NewFileDialog::Cancelled)
+    {
+        return;
+    }
+
+    if (fileType == NewFileDialog::MarkdownFile)
+    {
+        MarkdownEditor *mdEditor = new MarkdownEditor(this);
+        mdEditor->setPlainText("# 新建 Markdown 文档\n\n在此输入内容...\n");
+        mdEditor->setDocumentModified(true);
+
+        connect(mdEditor, &MarkdownEditor::textChanged,
+                this, &CompilerIDE::documentWasModified);
+
+        const QString tabTitle = QString("untitled%1.md").arg(untitledCounter++);
+        const int index = tabWidget->addTab(mdEditor, tabTitle);
+        tabWidget->setCurrentIndex(index);
+
+        curFile.clear();
+        setWindowFilePath(tabTitle);
+        setWindowModified(true);
+        tabWidget->setTabText(index, tabTitle);
+        setWindowTitle(tr("Compiler IDE %1").arg(IDE_VERSION));
+        return;
+    }
+
+    const bool isEasyX = fileType == NewFileDialog::EasyXProject;
 
     CodeEditor *editor = new CodeEditor;
 
@@ -27295,6 +36219,8 @@ void CompilerIDE::newFile()
     editor->setAutoQuotesEnabled(autoQuotes);
     editor->setCodeBeautifyEnabled(codeBeautify);
     editor->setCompletionEnabled(codeCompletionEnabled);
+    editor->setCompletionAcceptMode(completionAcceptMode);
+    editor->setIndentationMode(indentationMode);
     qDebug() << "[newFile/loadFile] 即将设置 editorFont:" << editorFont.family() << editorFont.pointSize();
     editor->setEditorFont(editorFont);
     editor->setAutoIndentEnabled(autoIndent);
@@ -27375,7 +36301,7 @@ void CompilerIDE::newFile()
     connect(editor, &CodeEditor::fontSizeChanged,
             this, &CompilerIDE::onEditorFontSizeChanged);
 
-    connect(editor->document(), &QTextDocument::contentsChanged,
+    connect(editor, &CodeEditor::plainTextChanged,
             this, &CompilerIDE::documentWasModified);
 
     connect(editor, &CodeEditor::cursorPositionChanged,
@@ -27395,11 +36321,16 @@ void CompilerIDE::newFile()
             out << editor->toPlainText();
             tempFile.close();
         }
+
         QString dir = QFileInfo(tempFilePath).absolutePath();
         bool isEasyXFlag = editorEasyXFlags.value(editor, false);
         ensureCompileFlags(dir, isEasyXFlag);
         sendOpenToLSP(editor, tempFilePath);
-        connect(editor, &QPlainTextEdit::textChanged, this, [this, editor, tempFilePath]()
+
+        QTimer *tempFileSyncTimer = new QTimer(editor);
+        tempFileSyncTimer->setSingleShot(true);
+        tempFileSyncTimer->setInterval(250);
+        connect(tempFileSyncTimer, &QTimer::timeout, this, [this, editor, tempFilePath]()
                 {
                     QFile f(tempFilePath);
                     if (f.open(QIODevice::WriteOnly | QIODevice::Text))
@@ -27408,10 +36339,17 @@ void CompilerIDE::newFile()
                         out << editor->toPlainText();
                         f.close();
                     }
+
                     if (m_lspDebounceTimer)
                     {
+                        m_pendingLSPEditor = editor;
                         m_lspDebounceTimer->start(300);
                     }
+                });
+
+        connect(editor, &QPlainTextEdit::textChanged, this, [tempFileSyncTimer]()
+                {
+                    tempFileSyncTimer->start();
                 },
                 Qt::UniqueConnection);
     }
@@ -27562,7 +36500,11 @@ dialog->exec();
 void CompilerIDE::open()
 {
     QString fileName = QFileDialog::getOpenFileName(this, tr("打开文件"), "",
-                                                    tr("C++文件 (*.cpp *.cc *.cxx *.c++ *.h *.hpp *.hh *.hxx *.h++);;PDF文件 (*.pdf);;所有文件 (*)"));
+                                                    tr("所有支持的文件 (*.cpp *.cc *.cxx *.c++ *.h *.hpp *.hh *.hxx *.h++ *.md *.markdown *.pdf);;"
+                                                       "C++文件 (*.cpp *.cc *.cxx *.c++ *.h *.hpp *.hh *.hxx *.h++);;"
+                                                       "Markdown文件 (*.md *.markdown);;"
+                                                       "PDF文件 (*.pdf);;"
+                                                       "所有文件 (*)"));
     if (!fileName.isEmpty())
     {
         loadFile(fileName);
@@ -27849,6 +36791,8 @@ void CompilerIDE::showOpenSourceNotice()
     const QString scrollbarThumb = dark ? "#475569" : eyeCare ? "#B9AA7D" : "#cbd5e1";
     const QString scrollbarThumbHover = dark ? "#64748b" : eyeCare ? "#9F9069" : "#94a3b8";
 
+    dialog->setStyleSheet(QString("QDialog { background: %1; }").arg(bgStart));
+
     QPixmap logoPixmap(":/icons/CompilerIDE_logo_bright.png");
     if (logoPixmap.isNull())
     {
@@ -27964,8 +36908,11 @@ void CompilerIDE::showOpenSourceNotice()
     };
 
     ExternalWebPage *page = new ExternalWebPage(dialog);
+    page->setBackgroundColor(QColor(bgStart));
+
     QWebEngineView *webView = new QWebEngineView(dialog);
     webView->setPage(page);
+    webView->setStyleSheet(QString("background-color: %1;").arg(bgStart));
     webView->settings()->setDefaultTextEncoding("utf-8");
 
     QVBoxLayout *layout = new QVBoxLayout(dialog);
@@ -28000,9 +36947,38 @@ void CompilerIDE::showOpenSourceNotice()
 void CompilerIDE::documentWasModified()
 {
     CodeEditor *editor = nullptr;
+    MarkdownEditor *mdEditor = qobject_cast<MarkdownEditor *>(sender());
+    if (mdEditor)
+    {
+        int index = tabWidget->indexOf(mdEditor);
+        if (index >= 0)
+        {
+            QString title = tabWidget->tabText(index);
+            if (title.endsWith("*"))
+            {
+                if (!mdEditor->isModified())
+                {
+                    title.chop(1);
+                    tabWidget->setTabText(index, title);
+                }
+            }
+            else
+            {
+                if (mdEditor->isModified())
+                {
+                    tabWidget->setTabText(index, title + "*");
+                }
+            }
+        }
+        setWindowModified(mdEditor->isModified());
+        updateStatusBar();
+        return;
+    }
+
+    editor = qobject_cast<CodeEditor *>(sender());
 
     QTextDocument *changedDoc = qobject_cast<QTextDocument *>(sender());
-    if (changedDoc)
+    if (!editor && changedDoc)
     {
         for (int i = 0; i < tabWidget->count(); i++)
         {
@@ -28057,28 +37033,15 @@ void CompilerIDE::documentWasModified()
             return;
         }
 
-        QByteArray currentHash = QCryptographicHash::hash(
-                                     editor->toPlainText().toUtf8(),
-                                     QCryptographicHash::Sha1)
-                                     .toHex();
+        const int nextVersion = m_editorVersions.value(editor, 1) + 1;
+        editor->setProperty("lspExpectedDiagnosticsVersion", nextVersion);
+        editor->setProperty("lspDiagnosticsDirty", true);
 
-        QByteArray lastHash = editor->property("lspLastTextHash").toByteArray();
+        m_pendingLSPEditor = editor;
 
-        if (currentHash != lastHash)
+        if (m_lspDebounceTimer)
         {
-            // Reserve the next LSP version immediately, before the 300 ms debounce.
-            // Otherwise an old publishDiagnostics can arrive in this gap and be
-            // mistaken for diagnostics belonging to the newly edited text.
-            const int nextVersion = m_editorVersions.value(editor, 1) + 1;
-            editor->setProperty("lspExpectedDiagnosticsVersion", nextVersion);
-            editor->setProperty("lspDiagnosticsDirty", true);
-
-            m_pendingLSPEditor = editor;
-
-            if (m_lspDebounceTimer)
-            {
-                m_lspDebounceTimer->start(300);
-            }
+            m_lspDebounceTimer->start(300);
         }
     }
 
@@ -28230,6 +37193,16 @@ void CompilerIDE::compile()
         return;
     }
 
+    auto pendingStateGuard = qScopeGuard([this]()
+    {
+        pendingRunAfterCompile = false;
+        pendingDebugAfterCompile = false;
+        if (debugStartAct)
+        {
+            debugStartAct->setEnabled(true);
+        }
+    });
+
     if (compileProcess)
     {
         compileProcess->disconnect();
@@ -28325,7 +37298,7 @@ void CompilerIDE::compile()
         return false;
     };
 
-    if (containsNonAscii(curFile))
+    if (compilerType != "msvc" && containsNonAscii(curFile))
     {
         resetOutputFormat();
         outputEdit->appendPlainText(tr("检测到路径包含中文字符，使用临时目录编译..."));
@@ -28333,10 +37306,18 @@ void CompilerIDE::compile()
         originalOutputExe = QFileInfo(curFile).absoluteDir().filePath(
             QFileInfo(curFile).baseName() + ".exe");
 
-        QString tempDir = QDir::temp().absolutePath() + "/CompilerIDE_Build";
-        QDir().mkpath(tempDir);
+        const QString sourceKey = QString::fromLatin1(
+            QCryptographicHash::hash(QFileInfo(curFile).absoluteFilePath().toUtf8(),
+                                     QCryptographicHash::Sha256).toHex().left(20));
+        QString tempDir = QDir::temp().filePath(
+            "CompilerIDE_Build_" + QString::number(QCoreApplication::applicationPid()) + "_" + sourceKey);
+        if (!QDir().mkpath(tempDir))
+        {
+            appendColoredText(tr("无法创建临时编译目录"), errorFormat);
+            return;
+        }
 
-        QString sourceFileName = QFileInfo(curFile).fileName();
+        QString sourceFileName = "temp_source.cpp";
 
         tempSourceFile = tempDir + "/" + sourceFileName;
 
@@ -28364,14 +37345,36 @@ void CompilerIDE::compile()
     outputExe += ".exe";
 #endif
 
+    this->actualSourceFile = actualSourceFile;
+    this->actualOutputDir = actualOutputDir;
     isNewCompilation = true;
+
+    bool executableIsRunning = false;
+    const QString normalizedOutputPath = QDir::cleanPath(QFileInfo(outputExe).absoluteFilePath());
+    for (auto it = managedRunTasks.cbegin(); it != managedRunTasks.cend(); ++it)
+    {
+        if (QString::compare(QDir::cleanPath(QFileInfo(it.value().programPath).absoluteFilePath()),
+                             normalizedOutputPath, Qt::CaseInsensitive) == 0 &&
+            isManagedRunTaskAlive(it.value()))
+        {
+            executableIsRunning = true;
+            break;
+        }
+    }
+
+    if (executableIsRunning)
+    {
+        const QString suffix = QUuid::createUuid().toString(QUuid::WithoutBraces).left(12);
+        outputExe = QDir(actualOutputDir).filePath(
+            QFileInfo(actualSourceFile).completeBaseName() + "_CompilerIDE_" + suffix + ".exe");
+        m_concurrentBuildExecutables.insert(outputExe);
+        appendDefaultText(tr("检测到已有同名程序正在运行，本次构建使用独立可执行文件：%1").arg(outputExe));
+    }
+
+    m_currentBuildExecutable = outputExe;
 
     if (QFile::exists(outputExe))
     {
-        QString exeName = QFileInfo(outputExe).fileName();
-        killProcessByName(exeName);
-        QThread::msleep(300);
-
         QFile file(outputExe);
         if (file.open(QIODevice::ReadWrite))
         {
@@ -28385,7 +37388,7 @@ void CompilerIDE::compile()
         }
     }
 
-    QString fileEncoding = detectFileEncoding(curFile);
+QString fileEncoding = detectFileEncoding(curFile);
 
     accumulatedErrors.clear();
     accumulatedWarnings.clear();
@@ -28402,6 +37405,7 @@ void CompilerIDE::compile()
     outputEdit->appendPlainText("");
 
     QStringList args;
+    QString actualCompilerPath = compilerPath;
     bool isEasyX = editorEasyXFlags.value(editor, false);
 
     if (compilerType == "msvc")
@@ -28428,7 +37432,7 @@ void CompilerIDE::compile()
         args << "/utf-8";
         args << "/Zi";
 
-        QString outputFile = QFileInfo(curFile).absolutePath() + "/" + QFileInfo(curFile).baseName() + ".exe";
+        QString outputFile = outputExe;
         args << "/Fe" + outputFile;
         args << curFile;
     }
@@ -28470,13 +37474,16 @@ void CompilerIDE::compile()
         outputFile += ".exe";
 #endif
         args << "-o" << outputExe;
+        if (usingTempDir)
+        {
+            args << "-iquote" << QFileInfo(curFile).absolutePath();
+        }
         args << actualSourceFile;
         if (isEasyX)
         {
             QString appDir = QCoreApplication::applicationDirPath();
             QString bundledTDMGCC = appDir + "/TDM-GCC/bin/g++.exe";
 
-            QString actualCompilerPath = compilerPath;
             QString compilerName = "配置的编译器";
 
             if (QFile::exists(bundledTDMGCC))
@@ -28543,7 +37550,6 @@ void CompilerIDE::compile()
                  << "-luuid"
                  << "-lgdiplus";
 
-            compilerPath = actualCompilerPath;
         }
     }
 
@@ -28582,7 +37588,7 @@ if (compileProcess)
     connect(compileProcess, &QProcess::readyReadStandardError,
             this, &CompilerIDE::readCompilerError);
 
-    QString commandLine = compilerPath + " " + args.join(" ");
+    QString commandLine = actualCompilerPath + " " + args.join(" ");
 
     appendDefaultText(tr("编译命令: %1").arg(commandLine));
     outputEdit->appendPlainText("");
@@ -28591,10 +37597,10 @@ if (compileProcess)
 
     qDebug() << "编译命令:" << commandLine;
 
-    compileProcess->start(compilerPath, args);
+    compileProcess->start(actualCompilerPath, args);
     if (!compileProcess->waitForStarted(5000))
     {
-        QString errorMsg = tr("无法启动编译器: %1").arg(compilerPath);
+        QString errorMsg = tr("无法启动编译器: %1").arg(actualCompilerPath);
         appendColoredText(errorMsg, errorFormat);
 
         accumulatedErrors.append(QString("0|0|%1").arg(errorMsg));
@@ -28607,199 +37613,116 @@ if (compileProcess)
 
         updateErrorTable(accumulatedErrors, accumulatedWarnings);
     }
+    else
+    {
+        pendingStateGuard.dismiss();
+    }
 }
 
-void CompilerIDE::killProcessByName(const QString &exeName)
+void CompilerIDE::killProcessByName(const QString &executablePath)
 {
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE)
+    if (!QFileInfo(executablePath).isAbsolute())
     {
         return;
     }
 
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-
-    if (Process32FirstW(hSnapshot, &pe32))
+    const QString expectedPath = QDir::cleanPath(QFileInfo(executablePath).absoluteFilePath());
+    const QList<DWORD> ownProcessIds = managedRunTasks.keys();
+    for (DWORD processId : ownProcessIds)
     {
-        do
+        if (!managedRunTasks.contains(processId))
         {
-            QString processName = QString::fromWCharArray(pe32.szExeFile);
-            if (processName.compare(exeName, Qt::CaseInsensitive) == 0)
-            {
-                HANDLE hProcess = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pe32.th32ProcessID);
-                if (hProcess != NULL)
-                {
-                    TerminateProcess(hProcess, 0);
-                    WaitForSingleObject(hProcess, 2000);
-                    CloseHandle(hProcess);
-                }
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
+            continue;
+        }
+        const ManagedRunTask task = managedRunTasks.value(processId);
+        if (QString::compare(QDir::cleanPath(QFileInfo(task.programPath).absoluteFilePath()),
+                             expectedPath, Qt::CaseInsensitive) != 0)
+        {
+            continue;
+        }
+        if (isManagedRunTaskAlive(task))
+        {
+            terminateManagedRunTask(processId);
+        }
+        else
+        {
+            managedRunTasks.remove(processId);
+        }
     }
-
-    CloseHandle(hSnapshot);
 }
 
 void CompilerIDE::runExecutable(const QString &programPath, bool isAfterCompile)
 {
     if (hRunningProcess != NULL)
     {
-        TerminateProcess(hRunningProcess, 0);
-        WaitForSingleObject(hRunningProcess, 3000);
         CloseHandle(hRunningProcess);
         hRunningProcess = NULL;
-
-        QThread::msleep(500);
     }
 
-    if (!QFile::exists(programPath))
+    const QString absoluteProgramPath = QFileInfo(programPath).absoluteFilePath();
+    if (!QFileInfo(absoluteProgramPath).isFile())
     {
-        appendColoredText(tr("错误：找不到可执行文件 %1").arg(programPath), errorFormat);
+        appendColoredText(tr("错误：找不到可执行文件 %1").arg(absoluteProgramPath), errorFormat);
         appendDefaultText(tr("请先编译程序"));
         return;
-    }
-
-    bool isEasyX = false;
-    CodeEditor *editor = currentEditor();
-    if (editor && editorEasyXFlags.contains(editor))
-    {
-        isEasyX = editorEasyXFlags.value(editor);
-    }
-
-    if (!isEasyX)
-    {
-        STARTUPINFOW si = {};
-        PROCESS_INFORMATION pi = {};
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESTDHANDLES;
-        HANDLE hNull = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                   nullptr, OPEN_EXISTING, 0, nullptr);
-        si.hStdInput = hNull;
-        si.hStdOutput = hNull;
-        si.hStdError = hNull;
-
-        std::wstring cmd = (L"\"" + QDir::toNativeSeparators(programPath).toStdWString() + L"\"");
-        if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                           CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
-        {
-            WaitForSingleObject(pi.hProcess, 300);
-            TerminateProcess(pi.hProcess, 0);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-        }
-        CloseHandle(hNull);
     }
 
     if (isAfterCompile)
     {
         outputEdit->appendPlainText("");
     }
+    appendDefaultText(tr("正在启动程序: %1").arg(absoluteProgramPath));
 
-    appendDefaultText(tr("正在启动程序: %1").arg(programPath));
+    QProcess helper;
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert("PATH", QCoreApplication::applicationDirPath() + "/mingw/bin;" + env.value("PATH"));
+    env.insert("__COMPILERIDE_RUN_HOST", QDir::toNativeSeparators(QCoreApplication::applicationFilePath()));
+    env.insert("__COMPILERIDE_RUN_TARGET", QDir::toNativeSeparators(absoluteProgramPath));
+    env.insert("__COMPILERIDE_RUN_CODEPAGE", detectFileEncoding(curFile) == "GBK" ? "936" : "65001");
 
-    QString batPath = QDir::temp().absolutePath() + "/run_program.bat";
-
-    QString sourceEncoding = detectFileEncoding(curFile);
-    bool isGBK = (sourceEncoding == "GBK");
-
-    QFile batFile(batPath);
-    if (batFile.open(QIODevice::WriteOnly | QIODevice::Text))
+    wchar_t systemDirectory[MAX_PATH] = {};
+    const UINT systemDirectoryLength = GetSystemDirectoryW(systemDirectory, MAX_PATH);
+    if (systemDirectoryLength == 0 || systemDirectoryLength >= MAX_PATH)
     {
-        QString nativeProgramPath = QDir::toNativeSeparators(programPath);
-        QString programDir = QDir::toNativeSeparators(QFileInfo(programPath).absolutePath());
-
-        if (isGBK)
-        {
-            QString batContent;
-            batContent += "@echo off\r\n";
-            batContent += "chcp 936 >nul 2>&1\r\n";
-            batContent += "set PATH=" + QCoreApplication::applicationDirPath() + "/mingw/bin;%PATH%\r\n";
-            batContent += "cd /d \"" + programDir + "\"\r\n";
-            batContent += "\"" + nativeProgramPath + "\"\r\n";
-            batContent += "set EXIT_CODE=%errorlevel%\r\n";
-            batContent += "echo.\r\n";
-            batContent += "echo 程序已退出，返回代码: %EXIT_CODE%\r\n";
-            batContent += "pause\r\n";
-
-            QStringEncoder encoder("GBK");
-            if (!encoder.isValid())
-            {
-                batFile.write(batContent.toLocal8Bit());
-            }
-            else
-            {
-                QByteArray gbkData = encoder.encode(batContent);
-                batFile.write(gbkData);
-            }
-        }
-        else
-        {
-            QTextStream out(&batFile);
-            out.setEncoding(QStringConverter::Utf8);
-            out << "@echo off\n";
-            out << "chcp 65001 >nul 2>&1\r\n";
-            out << "set PATH=" << QCoreApplication::applicationDirPath() + "/mingw/bin" << ";%PATH%\r\n";
-            out << "cd /d \"" << programDir << "\"\r\n";
-            out << "\"" << nativeProgramPath << "\"\r\n";
-            out << "set EXIT_CODE=%errorlevel%\r\n";
-            out << "echo.\r\n";
-            out << "echo 程序已退出，返回代码: %EXIT_CODE%\r\n";
-            out << "pause\r\n";
-        }
-        batFile.close();
-    }
-    else
-    {
-        appendColoredText(tr("无法创建启动脚本"), errorFormat);
+        appendColoredText(tr("无法定位 Windows 命令提示符"), errorFormat);
         return;
     }
 
-    QString command = QString("cmd.exe /c \"%1\"").arg(QDir::toNativeSeparators(batPath));
-
-    STARTUPINFO si;
-    PROCESS_INFORMATION pi;
-
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    ZeroMemory(&pi, sizeof(pi));
-
-    wchar_t commandW[4096];
-    command.toWCharArray(commandW);
-    commandW[command.length()] = '\0';
-
-    if (CreateProcess(NULL, commandW, NULL, NULL, FALSE,
-                      CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi))
+    const QString cmdPath = QDir(QString::fromWCharArray(systemDirectory)).filePath("cmd.exe");
+    if (!QFileInfo(cmdPath).isFile())
     {
-        hRunningProcess = pi.hProcess;
-        currentRunningExe = programPath;
-        CloseHandle(pi.hThread);
-
-        outputEdit->appendPlainText("");
-        appendColoredText(tr("程序已在控制台窗口中启动"), successFormat);
+        appendColoredText(tr("找不到 Windows 命令提示符: %1").arg(cmdPath), errorFormat);
+        return;
     }
-    else
+
+    helper.setProcessEnvironment(env);
+    helper.setProgram(cmdPath);
+    helper.setNativeArguments(R"(/d /v:off /s /c ""%__COMPILERIDE_RUN_HOST%" --compileride-console-run "%__COMPILERIDE_RUN_TARGET%" %__COMPILERIDE_RUN_CODEPAGE%")");
+    helper.setWorkingDirectory(QFileInfo(absoluteProgramPath).absolutePath());
+    helper.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *arguments)
     {
-        DWORD err = GetLastError();
-        appendColoredText(tr("无法运行程序: %1 (错误代码: %2)").arg(programPath).arg(err), errorFormat);
+        arguments->flags |= CREATE_NEW_CONSOLE;
+        arguments->startupInfo->dwFlags &= ~STARTF_USESTDHANDLES;
+    });
 
-        QProcess *process = new QProcess(this);
-        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-        QString currentPath = env.value("PATH");
-        env.insert("PATH", QCoreApplication::applicationDirPath() + "/mingw/bin;" + currentPath);
-        process->setProcessEnvironment(env);
-
-        if (process->startDetached(programPath))
-        {
-            appendDefaultText(tr("已通过备用方法启动程序"));
-        }
-        else
-        {
-            appendColoredText(tr("备用启动方法也失败"), errorFormat);
-        }
-        delete process;
+    qint64 processId = -1;
+    if (!helper.startDetached(&processId))
+    {
+        appendColoredText(tr("无法启动程序: %1").arg(helper.errorString()), errorFormat);
+        return;
     }
+
+    currentRunningExe = absoluteProgramPath;
+    if (processId > 0 && processId <= std::numeric_limits<DWORD>::max())
+    {
+        const DWORD childId = static_cast<DWORD>(processId);
+        hRunningProcess = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                      FALSE, childId);
+        registerManagedRunTask(childId, absoluteProgramPath,
+                               QString("CompilerIDE - %1").arg(QFileInfo(absoluteProgramPath).fileName()), false);
+    }
+    outputEdit->appendPlainText("");
+    appendColoredText(tr("程序已在控制台窗口中启动"), successFormat);
 }
 
 void CompilerIDE::run()
@@ -28832,84 +37755,40 @@ void CompilerIDE::run()
     }
 
     QString programPath;
-    QString tempDir = QDir::temp().absolutePath() + "/CompilerIDE_Build";
-    QString program = QFileInfo(curFile).baseName();
-
-    if (program.isEmpty())
+    const QFileInfo sourceInfo(curFile);
+    QString programName = sourceInfo.baseName();
+    if (programName.isEmpty())
     {
-        qDebug() << "错误: 无法获取文件基本名";
-        outputEdit->appendPlainText(tr("错误：无效的文件名"));
+        appendColoredText(tr("错误：无效的文件名"), errorFormat);
         return;
     }
-
 #ifdef Q_OS_WIN
-    program += ".exe";
+    programName += ".exe";
 #endif
 
-    QString tempOriginalExe = tempDir + "/" + program;
-    QString tempSourceExe = tempDir + "/temp_source.exe";
-    QFileInfo curFileInfo(curFile);
-    QString originalPath = curFileInfo.canonicalPath();
-
-    if (originalPath.isEmpty())
+    const QString originalPath = QDir(sourceInfo.absolutePath()).filePath(programName);
+    const bool hasVerifiedBuild =
+        QString::compare(QDir::cleanPath(sourceInfo.absoluteFilePath()),
+                         QDir::cleanPath(lastSuccessfulSource), Qt::CaseInsensitive) == 0 &&
+        QFileInfo(lastSuccessfulExecutable).isFile();
+    if (hasVerifiedBuild &&
+        QString::compare(QDir::cleanPath(lastSuccessfulExecutable),
+                         QDir::cleanPath(originalPath), Qt::CaseInsensitive) != 0)
     {
-        originalPath = curFileInfo.absolutePath();
+        programPath = lastSuccessfulExecutable;
     }
-
-    if (!originalPath.isEmpty())
-    {
-        originalPath = QDir(originalPath).filePath(program);
-    }
-    else
-    {
-        originalPath = QDir(curFileInfo.absolutePath()).filePath(program);
-    }
-
-    if (QFile::exists(tempOriginalExe))
-    {
-        programPath = tempOriginalExe;
-        qDebug() << "使用临时目录原始名文件:" << tempOriginalExe;
-    }
-    else if (QFile::exists(originalPath))
+    else if (QFileInfo(originalPath).isFile())
     {
         programPath = originalPath;
-        qDebug() << "使用原始路径文件:" << originalPath;
     }
-    else if (QFile::exists(tempSourceExe))
+    else if (hasVerifiedBuild)
     {
-        programPath = tempSourceExe;
-        qDebug() << "使用临时编译文件: temp_source.exe";
+        programPath = lastSuccessfulExecutable;
     }
     else
     {
-        appendColoredText(tr("错误：找不到可执行文件"), errorFormat);
-        appendDefaultText(tr("已检查路径:"));
-        appendDefaultText("  1. " + tempOriginalExe);
-        appendDefaultText("  2. " + originalPath);
-        appendDefaultText("  3. " + tempSourceExe);
-
-        QDir dir(tempDir);
-        if (dir.exists())
-        {
-            QStringList files = dir.entryList(QDir::Files);
-            outputEdit->appendPlainText("");
-            appendDefaultText(tr("临时目录实际文件列表:"));
-            if (files.isEmpty())
-            {
-                appendDefaultText(tr("  (目录为空)"));
-            }
-            else
-            {
-                for (const QString &file : files)
-                {
-                    appendDefaultText("  - " + file);
-                }
-            }
-        }
-        else
-        {
-            appendDefaultText(tr("临时目录不存在: %1").arg(tempDir));
-        }
+        appendColoredText(tr("错误：找不到当前源码对应的可执行文件"), errorFormat);
+        appendDefaultText(tr("已检查路径: %1").arg(originalPath));
         return;
     }
 
@@ -28943,22 +37822,6 @@ void CompilerIDE::compileAndRun()
     }
 
     showBuildPanels(false);
-    if (hRunningProcess != NULL)
-    {
-        TerminateProcess(hRunningProcess, 0);
-        WaitForSingleObject(hRunningProcess, 600);
-        CloseHandle(hRunningProcess);
-        hRunningProcess = NULL;
-        QThread::msleep(50);
-    }
-
-    if (!currentRunningExe.isEmpty())
-    {
-        QString exeName = QFileInfo(currentRunningExe).fileName();
-        killProcessByName(exeName);
-        QThread::msleep(50);
-    }
-
     outputEdit->clear();
 
 
@@ -28995,13 +37858,13 @@ void CompilerIDE::clearOutput()
 
 void CompilerIDE::compilerFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
-    Q_UNUSED(exitStatus)
-
     if (compileProcess)
     {
         compileProcess->disconnect();
     }
 
+    QString launchProgramPath;
+    bool copiedToOriginal = false;
     outputDock->show();
     outputDock->raise();
     outputEdit->verticalScrollBar()->setValue(outputEdit->verticalScrollBar()->maximum());
@@ -29010,14 +37873,13 @@ void CompilerIDE::compilerFinished(int exitCode, QProcess::ExitStatus exitStatus
     cursor.movePosition(QTextCursor::End);
     cursor.setCharFormat(defaultFormat);
 
-    if (exitCode == 0)
+    if (exitCode == 0 && exitStatus == QProcess::NormalExit)
     {
         QString fullProgramPath;
 
         if (usingTempDir)
         {
-            QString realBaseName = QFileInfo(lastCompiledFile).baseName();
-            fullProgramPath = QDir::temp().absolutePath() + "/CompilerIDE_Build/" + realBaseName + ".exe";
+            fullProgramPath = m_currentBuildExecutable;
             qDebug() << "使用临时目录，路径:" << fullProgramPath;
 
             if (QFile::exists(fullProgramPath))
@@ -29034,8 +37896,7 @@ void CompilerIDE::compilerFinished(int exitCode, QProcess::ExitStatus exitStatus
                 outputEdit->appendPlainText(tr("错误：编译成功但找不到可执行文件"));
                 outputEdit->appendPlainText(tr("预期路径: %1").arg(fullProgramPath));
 
-                QString tempDir = QDir::temp().absolutePath() + "/CompilerIDE_Build";
-                QDir dir(tempDir);
+                QDir dir(actualOutputDir);
                 QStringList files = dir.entryList(QDir::Files);
                 outputEdit->appendPlainText(tr("临时目录文件列表:"));
                 if (files.isEmpty())
@@ -29053,15 +37914,30 @@ void CompilerIDE::compilerFinished(int exitCode, QProcess::ExitStatus exitStatus
                     }
                 }
 
+                exitCode = 1;
+                QTimer::singleShot(0, this, [this]()
+                                   {
+                                       emit compilationFinished(false);
+                                   });
                 goto cleanup;
             }
         }
         else
         {
-            fullProgramPath = QFileInfo(lastCompiledFile).absolutePath() + "/" +
-                              QFileInfo(lastCompiledFile).baseName() + ".exe";
+            fullProgramPath = m_currentBuildExecutable;
 
             qDebug() << "使用原始目录，路径:" << fullProgramPath;
+        }
+
+        if (!QFileInfo(fullProgramPath).isFile())
+        {
+            appendColoredText(tr("编译器已退出，但未生成目标可执行文件: %1").arg(fullProgramPath), errorFormat);
+            exitCode = 1;
+            QTimer::singleShot(0, this, [this]()
+                               {
+                                   emit compilationFinished(false);
+                               });
+            goto cleanup;
         }
 
         qDebug() << "编译成功，程序路径:" << fullProgramPath;
@@ -29074,31 +37950,61 @@ void CompilerIDE::compilerFinished(int exitCode, QProcess::ExitStatus exitStatus
         cursor.setCharFormat(defaultFormat);
         outputEdit->setTextCursor(cursor);
 
-        if (pendingRunAfterCompile)
-        {
-            runExecutable(fullProgramPath, true);
-        }
-
+        launchProgramPath = fullProgramPath;
         if (usingTempDir && !originalOutputExe.isEmpty())
         {
-            QString realBaseName = QFileInfo(lastCompiledFile).baseName();
-            QString tempExe = QDir::temp().absolutePath() + "/CompilerIDE_Build/" + realBaseName + ".exe";
-
-            if (QFile::exists(tempExe))
+            QFile compiledExecutable(fullProgramPath);
+            QSaveFile destinationExecutable(originalOutputExe);
+            if (compiledExecutable.open(QIODevice::ReadOnly) && destinationExecutable.open(QIODevice::WriteOnly))
             {
-                if (QFile::exists(originalOutputExe))
+                bool completeCopy = true;
+                while (!compiledExecutable.atEnd())
                 {
-                    QFile::remove(originalOutputExe);
+                    const QByteArray block = compiledExecutable.read(1024 * 1024);
+                    if (block.isEmpty() || destinationExecutable.write(block) != block.size())
+                    {
+                        completeCopy = false;
+                        break;
+                    }
                 }
+                if (compiledExecutable.error() != QFileDevice::NoError)
+                {
+                    completeCopy = false;
+                }
+                if (completeCopy)
+                {
+                    copiedToOriginal = destinationExecutable.commit();
+                }
+                if (!copiedToOriginal)
+                {
+                    destinationExecutable.cancelWriting();
+                }
+            }
+            if (copiedToOriginal)
+            {
+                launchProgramPath = originalOutputExe;
+                appendDefaultText(tr("可执行文件已复制到: %1").arg(originalOutputExe));
+            }
+            else
+            {
+                appendDefaultText(tr("警告: 无法将可执行文件复制到原目录，改用临时可执行文件"));
+            }
+        }
 
-                if (QFile::copy(tempExe, originalOutputExe))
-                {
-                    appendDefaultText(tr("可执行文件已复制到: %1").arg(originalOutputExe));
-                }
-                else
-                {
-                    appendDefaultText(tr("警告: 无法将可执行文件复制到原目录"));
-                }
+        lastSuccessfulSource = lastCompiledFile;
+        lastSuccessfulExecutable = launchProgramPath;
+        if (pendingRunAfterCompile)
+        {
+            runExecutable(launchProgramPath, true);
+        }
+
+        if (pendingDebugAfterCompile && usingTempDir && !copiedToOriginal)
+        {
+            pendingDebugAfterCompile = false;
+            appendColoredText(tr("调试失败：无法将编译结果复制到源码目录"), errorFormat);
+            if (debugStartAct)
+            {
+                debugStartAct->setEnabled(true);
             }
         }
 
@@ -29140,23 +38046,14 @@ void CompilerIDE::compilerFinished(int exitCode, QProcess::ExitStatus exitStatus
 
         if (usingTempDir)
         {
-            QTimer::singleShot(2000, this, [this]()
-                               {
-                                   QString realBaseName = QFileInfo(lastCompiledFile).baseName();
-                                   QString tempExe = QDir::temp().absolutePath() + "/CompilerIDE_Build/" + realBaseName + ".exe";
-                                   if (QFile::exists(tempExe))
-                                   {
-                                       QFile::remove(tempExe);
-                                   }
-                                   if (!tempSourceFile.isEmpty() && QFile::exists(tempSourceFile))
-                                   {
-                                       QFile::remove(tempSourceFile);
-                                   }
-
-                                   usingTempDir = false;
-                                   tempSourceFile.clear();
-                                   originalOutputExe.clear();
-                               });
+            QFile::remove(tempSourceFile);
+            if (copiedToOriginal)
+            {
+                QFile::remove(fullProgramPath);
+            }
+            usingTempDir = false;
+            tempSourceFile.clear();
+            originalOutputExe.clear();
         }
 
         QTimer::singleShot(0, this, [this]()
@@ -29193,7 +38090,7 @@ cleanup:
     pendingRunAfterCompile = false;
     pendingDebugAfterCompile = false;
 
-    if (exitCode != 0)
+    if (exitCode != 0 || exitStatus != QProcess::NormalExit)
     {
         if (usingTempDir)
         {
@@ -29384,7 +38281,8 @@ void CompilerIDE::updateErrorTable(const QStringList &errors, const QStringList 
                     nameMatch = editorAt(i);
                     ++matches;
                 }
-            }
+
+}
             if (matches == 1)
             {
                 return nameMatch;
@@ -30106,6 +39004,24 @@ void CompilerIDE::showErrorInCode(int row, int column)
 void CompilerIDE::updateStatusBar()
 {
     CodeEditor *editor = currentEditor();
+
+    MarkdownEditor *mdEditor = qobject_cast<MarkdownEditor *>(tabWidget->currentWidget());
+    if (mdEditor)
+    {
+        QString filePath = m_markdownFilePaths.value(mdEditor);
+        if (filePath.isEmpty())
+        {
+            statusBar()->showMessage(tr("无标题 Markdown - 已修改"));
+        }
+        else
+        {
+            statusBar()->showMessage(tr("%1 - %2")
+                                         .arg(strippedName(filePath))
+                                         .arg(mdEditor->isModified() ? tr("已修改") : tr("已保存")));
+        }
+        return;
+    }
+
     if (!editor)
     {
         statusBar()->showMessage(tr("就绪"));
@@ -30150,19 +39066,27 @@ void CompilerIDE::showSettings()
         themeMode,
         codeBeautify,
         codeCompletionEnabled,
+        completionAcceptMode,
+        indentationMode,
         editorFont,
         customCompileCommands,
         currentCustomCompileCommand,
-        previewUpdates);
+        previewUpdates,
+        sidebarFeatureNames,
+        m_visibleSidebarFeatureNames);
 
     if (dialog.exec() == QDialog::Accepted)
     {
         debuggerPath = dialog.getDebuggerPath();
         codeBeautify = dialog.getCodeBeautify();
         codeCompletionEnabled = dialog.getCodeCompletion();
+        completionAcceptMode = dialog.getCompletionAcceptMode();
+        indentationMode = dialog.getIndentationMode();
         customCompileCommands = dialog.getCustomCompileCommands();
         currentCustomCompileCommand = dialog.getCurrentCustomCompileCommand();
         previewUpdates = dialog.getPreviewUpdates();
+        m_visibleSidebarFeatureNames = dialog.getVisibleSidebarFeatures();
+        applySidebarFeatureVisibility();
 
         if (codeCompleter)
         {
@@ -30178,6 +39102,8 @@ void CompilerIDE::showSettings()
             dialog.getLineNumbers(),
             dialog.getThemeMode(),
             codeCompletionEnabled,
+            completionAcceptMode,
+            indentationMode,
             dialog.getEditorFont());
     }
 }
@@ -30190,6 +39116,8 @@ void CompilerIDE::applySettings(const QString &compilerPath,
                                 bool lineNumbers,
                                 ThemeMode themeMode,
                                 bool codeCompletion,
+                                CompletionAcceptMode completionAcceptMode,
+                                IndentationMode indentationMode,
                                 const QFont &editorFont)
 {
     const QString oldCompilerPath = this->compilerPath;
@@ -30202,6 +39130,8 @@ void CompilerIDE::applySettings(const QString &compilerPath,
     this->indentSize = indentSize;
     this->lineNumbers = lineNumbers;
     this->codeCompletionEnabled = codeCompletion;
+    this->completionAcceptMode = completionAcceptMode;
+    this->indentationMode = indentationMode;
     this->editorFont = editorFont;
     this->themeMode = themeMode;
     this->darkTheme = themeMode == ThemeMode::Dark;
@@ -30230,6 +39160,8 @@ void CompilerIDE::applySettings(const QString &compilerPath,
         editor->setAutoQuotesEnabled(autoQuotes);
         editor->setAutoIndentEnabled(autoIndent);
         editor->setCompletionEnabled(codeCompletion);
+        editor->setCompletionAcceptMode(completionAcceptMode);
+        editor->setIndentationMode(indentationMode);
         editor->setIndentSize(indentSize);
         editor->setLineNumbersEnabled(lineNumbers);
         editor->setCodeBeautifyEnabled(codeBeautify);
@@ -30304,6 +39236,61 @@ void CompilerIDE::closeTab(int index)
 {
     const QString closedFilePath = tabWidget->tabToolTip(index);
     QWidget *widget = tabWidget->widget(index);
+    MarkdownEditor *mdEditor = qobject_cast<MarkdownEditor *>(widget);
+    if (mdEditor)
+    {
+        if (mdEditor->isModified())
+        {
+            tabWidget->setCurrentIndex(index);
+            QMessageBox::StandardButton ret = QMessageBox::warning(
+                this, tr("Compiler IDE"),
+                tr("Markdown 文档已被修改。\n是否要保存更改？"),
+                QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+
+            if (ret == QMessageBox::Save)
+            {
+                QString filePath = m_markdownFilePaths.value(mdEditor);
+                if (filePath.isEmpty())
+                {
+                    QString defaultName = tabWidget->tabText(index);
+                    if (defaultName.endsWith("*"))
+                    {
+                        defaultName.chop(1);
+                    }
+                    filePath = QFileDialog::getSaveFileName(this,
+                                                            tr("另存为"),
+                                                            QDir::homePath() + "/" + defaultName,
+                                                            tr("Markdown 文件 (*.md *.markdown)"));
+                    if (filePath.isEmpty())
+                    {
+                        return;
+                    }
+                }
+                if (!saveMarkdownFile(mdEditor, filePath))
+                {
+                    return;
+                }
+            }
+            else if (ret == QMessageBox::Cancel)
+            {
+                return;
+            }
+        }
+
+        m_markdownFilePaths.remove(mdEditor);
+        tabWidget->removeTab(index);
+        mdEditor->deleteLater();
+
+        if (tabWidget->count() == 0)
+        {
+            setCurrentFile("");
+        }
+        else
+        {
+            currentTabChanged(tabWidget->currentIndex());
+        }
+        return;
+    }
     if (!widget)
     {
         return;
@@ -30384,7 +39371,8 @@ void CompilerIDE::closeTab(int index)
     else
     {
         delete widget;
-    }
+
+}
 
     if (!lspDirToClean.isEmpty())
     {
@@ -30429,32 +39417,7 @@ void CompilerIDE::closeTab(int index)
 
         if (!otherTabUsesDir)
         {
-            QString metaFilePath = lspDirToClean + "/.compileride_lsp_flags.meta";
-            QString flagsFilePath = lspDirToClean + "/compile_flags.txt";
-
-            if (QFile::exists(metaFilePath))
-            {
-                if (QFile::remove(metaFilePath))
-                {
-                    qDebug() << "[LSP Cleanup] 已删除 meta 文件:" << metaFilePath;
-                }
-                else
-                {
-                    qWarning() << "[LSP Cleanup] 无法删除 meta 文件:" << metaFilePath;
-                }
-
-                if (QFile::exists(flagsFilePath))
-                {
-                    if (QFile::remove(flagsFilePath))
-                    {
-                        qDebug() << "[LSP Cleanup] 已删除 compile_flags.txt:" << flagsFilePath;
-                    }
-                    else
-                    {
-                        qWarning() << "[LSP Cleanup] 无法删除 compile_flags.txt:" << flagsFilePath;
-                    }
-                }
-            }
+            removeOwnedCompileFlags(lspDirToClean);
         }
         else
         {
@@ -30491,6 +39454,18 @@ void CompilerIDE::currentTabChanged(int index)
         setCurrentFile("");
         return;
     }
+
+    MarkdownEditor *mdEditor = qobject_cast<MarkdownEditor *>(tabWidget->widget(index));
+    if (mdEditor)
+    {
+        QString filePath = m_markdownFilePaths.value(mdEditor);
+        curFile = filePath;
+        m_currentMarkdownEditor = mdEditor;
+        updateStatusBar();
+        return;
+    }
+
+    m_currentMarkdownEditor = nullptr;
 
     CodeEditor *editor = editorAt(index);
     if (editor)
@@ -31039,6 +40014,37 @@ QStringList CompilerIDE::detectMinGWIncludePaths(const QString &compilerPath)
     return paths;
 }
 
+void CompilerIDE::removeOwnedCompileFlags(const QString &dirPath)
+{
+    const QString key = QDir(dirPath).absolutePath();
+    if (!m_lspOwnedFiles.contains(key))
+    {
+        return;
+    }
+
+    const QPair<QByteArray, QByteArray> record = m_lspOwnedFiles.value(key);
+    const QString flagPath = QDir(key).filePath("compile_flags.txt");
+    const QString metaPath = QDir(key).filePath(".compileride_lsp_flags.meta");
+    QFile flags(flagPath);
+    QFile meta(metaPath);
+    if (flags.open(QIODevice::ReadOnly) && meta.open(QIODevice::ReadOnly))
+    {
+        const QByteArray currentHash = QCryptographicHash::hash(flags.readAll(), QCryptographicHash::Sha256);
+        const QByteArray currentMeta = meta.readAll().trimmed();
+        flags.close();
+        meta.close();
+        if (currentHash == record.first && currentMeta == record.second)
+        {
+            if (QFile::remove(flagPath))
+            {
+                QFile::remove(metaPath);
+            }
+        }
+    }
+    m_lspOwnedFiles.remove(key);
+    m_lspFlagDirs.remove(key);
+}
+
 void CompilerIDE::ensureCompileFlags(const QString &dirPath, bool isEasyX)
 {
     static QMap<QString, bool> scheduledJobs;
@@ -31096,6 +40102,28 @@ void CompilerIDE::ensureCompileFlags(const QString &dirPath, bool isEasyX)
 
     QString flagFilePath = dir.filePath("compile_flags.txt");
     QString metaFilePath = dir.filePath(".compileride_lsp_flags.meta");
+    const QString ownedDirectory = dir.absolutePath();
+    const bool ownedByThisSession = m_lspOwnedFiles.contains(ownedDirectory);
+    const QPair<QByteArray, QByteArray> previousOwnerRecord = m_lspOwnedFiles.value(ownedDirectory);
+    if (QFile::exists(flagFilePath) && !ownedByThisSession)
+    {
+        return;
+    }
+    if (QFile::exists(metaFilePath) && !ownedByThisSession)
+    {
+        return;
+    }
+    if (ownedByThisSession)
+    {
+        QFile existingFlags(flagFilePath);
+        QFile existingMeta(metaFilePath);
+        if (!existingFlags.open(QIODevice::ReadOnly) || !existingMeta.open(QIODevice::ReadOnly) ||
+            QCryptographicHash::hash(existingFlags.readAll(), QCryptographicHash::Sha256) != previousOwnerRecord.first ||
+            existingMeta.readAll().trimmed() != previousOwnerRecord.second)
+        {
+            return;
+        }
+    }
 
     QFile metaFile(metaFilePath);
     if (QFile::exists(flagFilePath) &&
@@ -31130,7 +40158,9 @@ void CompilerIDE::ensureCompileFlags(const QString &dirPath, bool isEasyX)
                                        localCompilerPath,
                                        localStandard,
                                        localIsEasyX,
-                                       expectedKey]()
+                                       expectedKey,
+                                       ownedByThisSession,
+                                       previousOwnerRecord]()
                                       {
                                           if (!self)
                                           {
@@ -31151,8 +40181,11 @@ void CompilerIDE::ensureCompileFlags(const QString &dirPath, bool isEasyX)
 
                                           if (targetProc.waitForFinished(3000))
                                           {
-                                              QString target = QString::fromLocal8Bit(targetProc.readAllStandardOutput()).trimmed();
-                                              if (!target.isEmpty())
+                                              const QString target = QString::fromLocal8Bit(targetProc.readAllStandardOutput()).trimmed();
+                                              const QRegularExpression targetPattern("^[A-Za-z0-9_+.-]+$");
+                                              if (targetProc.exitStatus() == QProcess::NormalExit &&
+                                                  targetProc.exitCode() == 0 && target.contains('-') &&
+                                                  targetPattern.match(target).hasMatch())
                                               {
                                                   flags << "--target=" + target;
                                               }
@@ -31164,6 +40197,46 @@ void CompilerIDE::ensureCompileFlags(const QString &dirPath, bool isEasyX)
                                           }
 
                                           QStringList incPaths = self->detectMinGWIncludePaths(localCompilerPath);
+                                          bool hasGnuUmbrellaHeader = false;
+                                          for (const QString &path : incPaths)
+                                          {
+                                              if (QFile::exists(QDir(path).filePath("bits/stdc++.h")))
+                                              {
+                                                  hasGnuUmbrellaHeader = true;
+                                                  break;
+                                              }
+                                          }
+                                          if (!hasGnuUmbrellaHeader)
+                                          {
+                                              const QString appDir = QCoreApplication::applicationDirPath();
+                                              const QStringList candidates = {
+                                                  appDir + "/mingw/bin/g++.exe",
+                                                  appDir + "/TDM-GCC/bin/g++.exe",
+                                                  QStandardPaths::findExecutable("g++.exe")};
+                                              for (const QString &candidate : candidates)
+                                              {
+                                                  if (!QFileInfo(candidate).isFile())
+                                                  {
+                                                      continue;
+                                                  }
+                                                  const QStringList fallbackPaths = self->detectMinGWIncludePaths(candidate);
+                                                  bool found = false;
+                                                  for (const QString &fallback : fallbackPaths)
+                                                  {
+                                                      if (QFile::exists(QDir(fallback).filePath("bits/stdc++.h")))
+                                                      {
+                                                          found = true;
+                                                          break;
+                                                      }
+                                                  }
+                                                  if (found)
+                                                  {
+                                                      incPaths.append(fallbackPaths);
+                                                      break;
+                                                  }
+                                              }
+                                          }
+                                          incPaths.removeDuplicates();
 
                                           for (const QString &p : incPaths)
                                           {
@@ -31215,19 +40288,39 @@ void CompilerIDE::ensureCompileFlags(const QString &dirPath, bool isEasyX)
                                               flags << "-D_UNICODE";
                                           }
 
+                                          const QString workerFlagPath = dir.filePath("compile_flags.txt");
+                                          const QString workerMetaPath = dir.filePath(".compileride_lsp_flags.meta");
+                                          if (!ownedByThisSession &&
+                                              (QFile::exists(workerFlagPath) || QFile::exists(workerMetaPath)))
+                                          {
+                                              return;
+                                          }
+                                          if (ownedByThisSession)
+                                          {
+                                              QFile previousFlags(workerFlagPath);
+                                              QFile previousMeta(workerMetaPath);
+                                              if (!previousFlags.open(QIODevice::ReadOnly) ||
+                                                  !previousMeta.open(QIODevice::ReadOnly) ||
+                                                  QCryptographicHash::hash(previousFlags.readAll(), QCryptographicHash::Sha256) != previousOwnerRecord.first ||
+                                                  previousMeta.readAll().trimmed() != previousOwnerRecord.second)
+                                              {
+                                                  return;
+                                              }
+                                          }
+
                                           bool flagsWritten = false;
-                                          QSaveFile flagFile(dir.filePath("compile_flags.txt"));
+                                          QSaveFile flagFile(workerFlagPath);
                                           if (flagFile.open(QIODevice::WriteOnly | QIODevice::Text))
                                           {
-                                              QTextStream out(&flagFile);
-                                              out.setEncoding(QStringConverter::Utf8);
-
-                                              for (const QString &flag : flags)
+                                              const QByteArray bytes = (flags.join('\n') + '\n').toUtf8();
+                                              if (flagFile.write(bytes) == bytes.size())
                                               {
-                                                  out << flag << '\n';
+                                                  flagsWritten = flagFile.commit();
                                               }
-                                              out.flush();
-                                              flagsWritten = flagFile.commit();
+                                              else
+                                              {
+                                                  flagFile.cancelWriting();
+                                              }
                                           }
 
                                           if (flagsWritten)
@@ -31235,14 +40328,24 @@ void CompilerIDE::ensureCompileFlags(const QString &dirPath, bool isEasyX)
                                               QSaveFile metaFile(dir.filePath(".compileride_lsp_flags.meta"));
                                               if (metaFile.open(QIODevice::WriteOnly | QIODevice::Text))
                                               {
-                                                  metaFile.write(expectedKey.toUtf8());
-                                                  if (metaFile.commit())
+                                                  const QByteArray metaBytes = expectedKey.toUtf8();
+                                                  if (metaFile.write(metaBytes) == metaBytes.size() && metaFile.commit())
                                                   {
-                                                      QMetaObject::invokeMethod(self, [self, localDirPath]()
-                                                                                {
-                                                                                    self->m_lspFlagDirs.insert(localDirPath);
-                                                                                },
-                                                                                Qt::QueuedConnection);
+                                                      QFile writtenFlags(workerFlagPath);
+                                                      if (writtenFlags.open(QIODevice::ReadOnly))
+                                                      {
+                                                          const QByteArray flagHash = QCryptographicHash::hash(
+                                                              writtenFlags.readAll(), QCryptographicHash::Sha256);
+                                                          QMetaObject::invokeMethod(self, [self, localDirPath, flagHash, metaBytes]()
+                                                                                    {
+                                                                                        if (self)
+                                                                                        {
+                                                                                            self->m_lspFlagDirs.insert(localDirPath);
+                                                                                            self->m_lspOwnedFiles.insert(localDirPath, qMakePair(flagHash, metaBytes));
+                                                                                        }
+                                                                                    },
+                                                                                    Qt::QueuedConnection);
+                                                      }
                                                   }
                                               }
                                           }
@@ -31331,7 +40434,7 @@ void CompilerIDE::initLSP()
                                        if (!editor)
                                        {
                                            QString filePath = QUrl(uri).toLocalFile();
-                                           int idx = findEditor(filePath);
+                                           int idx = findEditorByFilePath(filePath);
                                            if (idx == -1)
                                                return;
                                            editor = editorAt(idx);
@@ -31384,7 +40487,7 @@ void CompilerIDE::initLSP()
                                            if (!startBlock.isValid())
                                                continue;
 
-                                           QTextBlock endBlock = editor->document()->findBlockByLineNumber(d.endLine);
+QTextBlock endBlock = editor->document()->findBlockByLineNumber(d.endLine);
 
                                            int startColumn = qBound(0, d.column, qMax(0, startBlock.length() - 1));
                                            int startPos = startBlock.position() + startColumn;
@@ -31590,7 +40693,7 @@ if (!m_lspAvailable || !m_lspClient)
                            QString expectedKey = QString::fromLatin1(
                                QCryptographicHash::hash(keyRaw.toUtf8(), QCryptographicHash::Sha1).toHex());
 
-                           bool flagsReady = dir.exists("compile_commands.json");
+                           bool flagsReady = dir.exists("compile_commands.json") || dir.exists("compile_flags.txt");
 
                            if (!flagsReady)
                            {
@@ -31778,21 +40881,84 @@ void UpdateManager::setupAutoUpdate()
 
     if (!mainWin)
     {
-        QTimer::singleShot(1000, &QApplication::quit);
+        QMessageBox::critical(nullptr, tr("更新错误"), tr("未找到 IDE 主窗口，无法继续安装更新。"));
         return;
     }
 
-    bool closed = mainWin->close();
+    const QString powerShellPath = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
+    if (powerShellPath.isEmpty())
+    {
+        QMessageBox::critical(mainWin, tr("更新错误"), tr("无法找到 Windows PowerShell，无法在 IDE 退出后启动安装程序。"));
+        return;
+    }
+
+    while (!mainWin->maybeSaveAll())
+    {
+        QMessageBox retryPrompt(mainWin);
+        retryPrompt.setWindowTitle(tr("安装更新"));
+        retryPrompt.setIcon(QMessageBox::Warning);
+        retryPrompt.setText(tr("文件保存未完成，安装尚未开始。"));
+        retryPrompt.setInformativeText(tr("安装包已下载并通过校验，您可以重新处理未保存的文件后继续安装，或者暂不安装。\n\n已下载的安装包：%1").arg(installerPath));
+        retryPrompt.setStandardButtons(QMessageBox::Retry | QMessageBox::Cancel);
+        retryPrompt.setDefaultButton(QMessageBox::Retry);
+        retryPrompt.button(QMessageBox::Retry)->setText(tr("重新处理文件"));
+        retryPrompt.button(QMessageBox::Cancel)->setText(tr("暂不安装"));
+
+        if (retryPrompt.exec() != QMessageBox::Retry)
+        {
+            return;
+        }
+    }
+
+    QMessageBox confirmation(mainWin);
+    confirmation.setWindowFlags(Qt::Dialog | Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+    confirmation.setWindowTitle(tr("安装更新"));
+    confirmation.setIcon(QMessageBox::Information);
+    confirmation.setText(tr("安装包已下载完成，即将进行安装，届时将关闭IDE。"));
+    confirmation.setStandardButtons(QMessageBox::Ok);
+    confirmation.setDefaultButton(QMessageBox::Ok);
+    confirmation.button(QMessageBox::Ok)->setText(tr("确定"));
+
+    if (confirmation.exec() != QMessageBox::Ok)
+    {
+        return;
+    }
+
+    const bool quitOnLastWindowClosed = QApplication::quitOnLastWindowClosed();
+    QApplication::setQuitOnLastWindowClosed(false);
+    mainWin->setUpdateClosePrepared(true);
+    const bool closed = mainWin->close();
+    mainWin->setUpdateClosePrepared(false);
+    QApplication::setQuitOnLastWindowClosed(quitOnLastWindowClosed);
+
     if (!closed)
     {
         qDebug() << "User cancelled update.";
         return;
     }
 
-    QObject::connect(mainWin, &QObject::destroyed, [this, installerPath]()
-                     {
-                         QProcess::startDetached(installerPath, QStringList());
-                     });
+    QString escapedInstallerPath = QDir::toNativeSeparators(QFileInfo(installerPath).absoluteFilePath());
+    escapedInstallerPath.replace(QStringLiteral("'"), QStringLiteral("''"));
+    const QString launchCommand = QStringLiteral("Wait-Process -Id %1 -ErrorAction SilentlyContinue; Start-Process -FilePath '%2'")
+                                      .arg(QCoreApplication::applicationPid())
+                                      .arg(escapedInstallerPath);
+    const QStringList launchArguments = {
+        QStringLiteral("-NoProfile"),
+        QStringLiteral("-NonInteractive"),
+        QStringLiteral("-WindowStyle"),
+        QStringLiteral("Hidden"),
+        QStringLiteral("-Command"),
+        launchCommand
+    };
+
+    if (!QProcess::startDetached(powerShellPath, launchArguments, QFileInfo(installerPath).absolutePath()))
+    {
+        mainWin->show();
+        QMessageBox::critical(mainWin, tr("更新错误"), tr("无法启动安装程序的等待进程，更新安装已取消。"));
+        return;
+    }
+
+    QApplication::quit();
 }
 
 LuoguFetcherWidget::LuoguFetcherWidget(CompilerIDE *ide, QWidget *parent)
@@ -32109,6 +41275,1178 @@ void LuoguFetcherWidget::fetchProblem(const QUrl &url)
     page->load(url);
 }
 
+InteractiveJudgeWidget::InteractiveJudgeWidget(CompilerIDE *ide, QWidget *parent)
+    : QWidget(parent), m_ide(ide)
+{
+    setObjectName(QStringLiteral("InteractiveJudgeRoot"));
+
+    QSettings preferences(QStringLiteral("CompilerIDE"), QStringLiteral("Compiler IDE 2.8.6"));
+    QVBoxLayout *rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->setSpacing(0);
+
+    QScrollArea *scrollArea = new QScrollArea(this);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+
+    QWidget *page = new QWidget;
+    page->setObjectName(QStringLiteral("InteractiveJudgePage"));
+    QVBoxLayout *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(16, 16, 16, 18);
+    layout->setSpacing(14);
+
+    QFrame *hero = new QFrame(page);
+    hero->setObjectName(QStringLiteral("InteractiveJudgeHero"));
+    QVBoxLayout *heroLayout = new QVBoxLayout(hero);
+    heroLayout->setContentsMargins(16, 15, 16, 15);
+    heroLayout->setSpacing(5);
+    QLabel *eyebrow = new QLabel(tr("INTERACTIVE JUDGE"), hero);
+    eyebrow->setObjectName(QStringLiteral("InteractiveJudgeEyebrow"));
+    QLabel *headline = new QLabel(tr("交互题检查"), hero);
+    headline->setObjectName(QStringLiteral("InteractiveJudgeHeadline"));
+    QLabel *subtitle = new QLabel(tr("连接选手程序与交互器，实时检查双向通信"), hero);
+    subtitle->setObjectName(QStringLiteral("InteractiveJudgeSubtitle"));
+    subtitle->setWordWrap(true);
+    heroLayout->addWidget(eyebrow);
+    heroLayout->addWidget(headline);
+    heroLayout->addWidget(subtitle);
+    layout->addWidget(hero);
+
+    QGroupBox *filesGroup = new QGroupBox(tr("程序与测试数据"), page);
+    m_filesGroup = filesGroup;
+    QGridLayout *filesLayout = new QGridLayout(filesGroup);
+    filesLayout->setContentsMargins(12, 19, 12, 12);
+    filesLayout->setHorizontalSpacing(7);
+    filesLayout->setVerticalSpacing(9);
+    filesLayout->setColumnStretch(1, 1);
+
+    auto addPathRow = [this, filesLayout, filesGroup](int row, const QString &label,
+                                                      const QString &description,
+                                                      const QString &filter) -> QLineEdit *
+    {
+        QLabel *caption = new QLabel(label, filesGroup);
+        QLineEdit *edit = new QLineEdit(filesGroup);
+        edit->setPlaceholderText(description);
+        edit->setClearButtonEnabled(true);
+        QPushButton *browse = new QPushButton(tr("浏览"), filesGroup);
+        browse->setObjectName(QStringLiteral("InteractiveJudgeBrowse"));
+        browse->setFixedWidth(58);
+        filesLayout->addWidget(caption, row, 0);
+        filesLayout->addWidget(edit, row, 1);
+        filesLayout->addWidget(browse, row, 2);
+        connect(browse, &QPushButton::clicked, this, [this, edit, label, filter]()
+                {
+                    selectPath(edit, label, filter);
+                });
+        return edit;
+    };
+
+    const QString executableFilter = tr("C++ 源文件或程序 (*.cpp *.cc *.cxx *.exe);;所有文件 (*.*)");
+    m_solutionPath = addPathRow(0, tr("选手程序"), tr("选择 .cpp 或 .exe"), executableFilter);
+    m_interactorPath = addPathRow(1, tr("交互器"), tr("选择交互器 .cpp 或 .exe"), executableFilter);
+    m_inputPath = addPathRow(2, tr("测试输入"), tr(".in / .txt 文件，或测试目录"), tr("测试输入 (*.in *.txt);;所有文件 (*.*)"));
+    m_answerPath = addPathRow(3, tr("答案文件"), tr("可选，testlib 需要时指定"), tr("答案文件 (*.ans *.out *.txt);;所有文件 (*.*)"));
+
+    QPushButton *selectDirectory = new QPushButton(tr("选择测试目录…"), filesGroup);
+    selectDirectory->setObjectName(QStringLiteral("InteractiveJudgeSecondary"));
+    filesLayout->addWidget(selectDirectory, 4, 1, 1, 2, Qt::AlignRight);
+    connect(selectDirectory, &QPushButton::clicked, this, [this]()
+            {
+                const QString path = QFileDialog::getExistingDirectory(this, tr("选择包含 .in 或 .txt 的测试目录"),
+                                                                       QFileInfo(m_inputPath->text().trimmed()).absolutePath());
+                if (!path.isEmpty())
+                {
+                    m_inputPath->setText(QDir::toNativeSeparators(path));
+                }
+            });
+    layout->addWidget(filesGroup);
+
+    QGroupBox *optionsGroup = new QGroupBox(tr("运行配置"), page);
+    QGridLayout *optionsLayout = new QGridLayout(optionsGroup);
+    optionsLayout->setContentsMargins(14, 22, 14, 14);
+    optionsLayout->setHorizontalSpacing(14);
+    optionsLayout->setVerticalSpacing(12);
+    optionsLayout->setColumnStretch(1, 1);
+
+    QLabel *modeLabel = new QLabel(tr("交互模式"), optionsGroup);
+    modeLabel->setObjectName(QStringLiteral("InteractiveJudgeOptionLabel"));
+    m_mode = new QComboBox(optionsGroup);
+    m_mode->addItem(tr("testlib 协议（文件参数）"));
+    m_mode->addItem(tr("普通双向管道（自定义参数）"));
+    m_mode->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_mode->setToolTip(tr("testlib 模式自动传入：输入文件、交互日志文件、答案文件"));
+    optionsLayout->addWidget(modeLabel, 0, 0);
+    optionsLayout->addWidget(m_mode, 0, 1);
+
+    QLabel *argumentsLabel = new QLabel(tr("交互器参数"), optionsGroup);
+    argumentsLabel->setObjectName(QStringLiteral("InteractiveJudgeOptionLabel"));
+    m_arguments = new QLineEdit(optionsGroup);
+    m_arguments->setPlaceholderText(tr("{input} {output} {answer}（可选）"));
+    m_arguments->setToolTip(tr("普通管道模式：支持 {input}、{output}、{answer} 占位符；参数中的路径请用双引号包围"));
+    optionsLayout->addWidget(argumentsLabel, 1, 0);
+    optionsLayout->addWidget(m_arguments, 1, 1);
+
+    QLabel *limitLabel = new QLabel(tr("单组时间限制 (ms)"), optionsGroup);
+    limitLabel->setObjectName(QStringLiteral("InteractiveJudgeOptionLabel"));
+    QWidget *limitEditor = new QWidget(optionsGroup);
+    limitEditor->setObjectName(QStringLiteral("InteractiveJudgeTimeLimitEditor"));
+    limitEditor->setAttribute(Qt::WA_StyledBackground, true);
+    limitEditor->setFixedHeight(34);
+    limitEditor->setMinimumWidth(132);
+    limitEditor->setMaximumWidth(172);
+
+    QHBoxLayout *limitEditorLayout = new QHBoxLayout(limitEditor);
+    limitEditorLayout->setContentsMargins(1, 1, 1, 1);
+    limitEditorLayout->setSpacing(0);
+
+    m_timeLimit = new QSpinBox(limitEditor);
+    m_timeLimit->setObjectName(QStringLiteral("InteractiveJudgeTimeLimitSpin"));
+    m_timeLimit->setRange(100, 60000);
+    m_timeLimit->setSingleStep(100);
+    m_timeLimit->setValue(2000);
+    m_timeLimit->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    m_timeLimit->setFrame(false);
+    m_timeLimit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    QWidget *limitButtons = new QWidget(limitEditor);
+    limitButtons->setFixedWidth(26);
+    QVBoxLayout *limitButtonsLayout = new QVBoxLayout(limitButtons);
+    limitButtonsLayout->setContentsMargins(0, 0, 0, 0);
+    limitButtonsLayout->setSpacing(0);
+
+    QToolButton *limitUpButton = new QToolButton(limitButtons);
+    limitUpButton->setObjectName(QStringLiteral("InteractiveJudgeTimeLimitUp"));
+    limitUpButton->setArrowType(Qt::UpArrow);
+    limitUpButton->setAutoRepeat(true);
+    limitUpButton->setAutoRepeatDelay(350);
+    limitUpButton->setAutoRepeatInterval(80);
+    limitUpButton->setFocusPolicy(Qt::NoFocus);
+    limitUpButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    limitUpButton->setToolTip(tr("增加时间限制"));
+
+    QToolButton *limitDownButton = new QToolButton(limitButtons);
+    limitDownButton->setObjectName(QStringLiteral("InteractiveJudgeTimeLimitDown"));
+    limitDownButton->setArrowType(Qt::DownArrow);
+    limitDownButton->setAutoRepeat(true);
+    limitDownButton->setAutoRepeatDelay(350);
+    limitDownButton->setAutoRepeatInterval(80);
+    limitDownButton->setFocusPolicy(Qt::NoFocus);
+    limitDownButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    limitDownButton->setToolTip(tr("减少时间限制"));
+
+    connect(limitUpButton, &QToolButton::clicked, m_timeLimit, &QAbstractSpinBox::stepUp);
+    connect(limitDownButton, &QToolButton::clicked, m_timeLimit, &QAbstractSpinBox::stepDown);
+
+    limitButtonsLayout->addWidget(limitUpButton, 1);
+    limitButtonsLayout->addWidget(limitDownButton, 1);
+    limitEditorLayout->addWidget(m_timeLimit, 1);
+    limitEditorLayout->addWidget(limitButtons);
+    limitEditor->setFocusProxy(m_timeLimit);
+    optionsLayout->addWidget(limitLabel, 2, 0);
+    optionsLayout->addWidget(limitEditor, 2, 1, Qt::AlignLeft);
+    layout->addWidget(optionsGroup);
+
+    QHBoxLayout *actionsLayout = new QHBoxLayout;
+    actionsLayout->setSpacing(9);
+    m_startButton = new QPushButton(tr("开始检查"), page);
+    m_startButton->setObjectName(QStringLiteral("InteractiveJudgePrimary"));
+    m_startButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
+    m_startButton->setIconSize(QSize(16, 16));
+    m_startButton->setMinimumSize(132, 36);
+    m_startButton->setCursor(Qt::PointingHandCursor);
+    m_stopButton = new QPushButton(tr("停止"), page);
+    m_stopButton->setObjectName(QStringLiteral("InteractiveJudgeSecondary"));
+    m_stopButton->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
+    m_stopButton->setIconSize(QSize(16, 16));
+    m_stopButton->setMinimumSize(90, 36);
+    m_stopButton->setCursor(Qt::PointingHandCursor);
+    m_clearButton = new QPushButton(tr("清空日志"), page);
+    m_clearButton->setObjectName(QStringLiteral("InteractiveJudgeSecondary"));
+    m_clearButton->setMinimumSize(92, 36);
+    m_stopButton->setEnabled(false);
+    actionsLayout->addWidget(m_startButton);
+    actionsLayout->addWidget(m_stopButton);
+    actionsLayout->addStretch(1);
+    actionsLayout->addWidget(m_clearButton);
+    layout->addLayout(actionsLayout);
+
+    QFrame *result = new QFrame(page);
+    result->setObjectName(QStringLiteral("InteractiveJudgeResult"));
+    QVBoxLayout *resultLayout = new QVBoxLayout(result);
+    resultLayout->setContentsMargins(13, 12, 13, 12);
+    resultLayout->setSpacing(5);
+    m_verdict = new QLabel(tr("准备就绪"), result);
+    m_verdict->setObjectName(QStringLiteral("InteractiveJudgeVerdict"));
+    m_details = new QLabel(tr("选择程序及交互器，然后开始检查"), result);
+    m_details->setObjectName(QStringLiteral("InteractiveJudgeDetails"));
+    m_details->setWordWrap(true);
+    m_caseStatus = new QLabel(tr("尚未运行"), result);
+    m_caseStatus->setObjectName(QStringLiteral("InteractiveJudgeCaseStatus"));
+    m_progress = new QProgressBar(result);
+    m_progress->setRange(0, 1);
+    m_progress->setValue(0);
+    m_progress->setTextVisible(true);
+    resultLayout->addWidget(m_verdict);
+    resultLayout->addWidget(m_details);
+    resultLayout->addWidget(m_caseStatus);
+    resultLayout->addWidget(m_progress);
+    layout->addWidget(result);
+
+    QLabel *transcriptLabel = new QLabel(tr("交互记录与诊断"), page);
+    transcriptLabel->setObjectName(QStringLiteral("InteractiveJudgeSectionTitle"));
+    layout->addWidget(transcriptLabel);
+    m_transcript = new QPlainTextEdit(page);
+    m_transcript->setReadOnly(true);
+    m_transcript->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_transcript->setMinimumHeight(230);
+    m_transcript->document()->setMaximumBlockCount(1600);
+    m_transcript->setFont(QFont(QStringLiteral("Consolas"), 10));
+    layout->addWidget(m_transcript);
+
+    m_information = new QLabel(tr("提示：交互器 stdout → 选手 stdin；选手 stdout → 交互器 stdin。请确保每次输出后刷新缓冲区（flush）。不支持函数调用式交互题。"), page);
+    m_information->setObjectName(QStringLiteral("InteractiveJudgeInformation"));
+    m_information->setWordWrap(true);
+    layout->addWidget(m_information);
+    layout->addStretch();
+    scrollArea->setWidget(page);
+    rootLayout->addWidget(scrollArea);
+
+    m_solutionPath->setText(preferences.value(QStringLiteral("interactiveJudge/solution")).toString());
+    m_interactorPath->setText(preferences.value(QStringLiteral("interactiveJudge/interactor")).toString());
+    m_inputPath->setText(preferences.value(QStringLiteral("interactiveJudge/input")).toString());
+    m_answerPath->setText(preferences.value(QStringLiteral("interactiveJudge/answer")).toString());
+    m_arguments->setText(preferences.value(QStringLiteral("interactiveJudge/arguments")).toString());
+    m_mode->setCurrentIndex(qBound(0, preferences.value(QStringLiteral("interactiveJudge/mode"), 0).toInt(), 1));
+    m_timeLimit->setValue(preferences.value(QStringLiteral("interactiveJudge/timeLimit"), 2000).toInt());
+
+    connect(m_mode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, argumentsLabel](int index)
+            {
+                const bool customArguments = index == 1;
+                argumentsLabel->setVisible(customArguments);
+                m_arguments->setVisible(customArguments);
+                m_arguments->setEnabled(customArguments);
+            });
+    const bool customArguments = m_mode->currentIndex() == 1;
+    argumentsLabel->setVisible(customArguments);
+    m_arguments->setVisible(customArguments);
+    m_arguments->setEnabled(customArguments);
+    connect(m_startButton, &QPushButton::clicked, this, &InteractiveJudgeWidget::startChecking);
+    connect(m_stopButton, &QPushButton::clicked, this, [this]()
+            {
+                finishChecking(tr("已停止"), tr("用户主动结束检查"), true);
+            });
+    connect(m_clearButton, &QPushButton::clicked, this, [this]()
+            {
+                m_transcript->clear();
+                m_pendingTranscript.clear();
+                m_transcriptBytes = 0;
+            });
+
+    m_watchdog = new QTimer(this);
+    m_watchdog->setInterval(75);
+    connect(m_watchdog, &QTimer::timeout, this, [this]()
+            {
+                if (m_phase == Phase::Compiling && m_stageClock.isValid() && m_stageClock.elapsed() > 120000)
+                {
+                    finishChecking(tr("CE · 编译超时"), tr("编译过程超过 120 秒"));
+                }
+                else if (m_phase == Phase::Starting && m_stageClock.isValid() && m_stageClock.elapsed() > 5000)
+                {
+                    completeCase(tr("启动失败"), tr("启动选手程序或交互器超时"), false);
+                }
+                else if (m_phase == Phase::Running && m_caseClock.isValid() && m_caseClock.elapsed() > m_timeLimit->value())
+                {
+                    completeCase(tr("TLE · 超时"), tr("当前测试点超过 %1 ms").arg(m_timeLimit->value()), false);
+                }
+                else if (m_phase == Phase::Running && m_caseClock.isValid())
+                {
+                    m_caseStatus->setText(tr("测试点 %1/%2 · %3 ms")
+                                              .arg(m_caseIndex + 1)
+                                              .arg(m_cases.size())
+                                              .arg(m_caseClock.elapsed()));
+                }
+            });
+
+    m_flushTimer = new QTimer(this);
+    m_flushTimer->setInterval(90);
+    connect(m_flushTimer, &QTimer::timeout, this, &InteractiveJudgeWidget::flushTranscript);
+    m_flushTimer->start();
+
+    const int selectedTheme = m_ide ? m_ide->property("themeMode").toInt() : static_cast<int>(ThemeMode::Dark);
+    setTheme(static_cast<ThemeMode>(qBound(0, selectedTheme, 2)));
+}
+
+InteractiveJudgeWidget::~InteractiveJudgeWidget()
+{
+    ++m_generation;
+    m_watchdog->stop();
+    releaseProcess(m_compiler);
+    releaseProcesses();
+    savePreferences();
+}
+
+void InteractiveJudgeWidget::setTheme(ThemeMode mode)
+{
+    m_theme = mode;
+    const bool dark = mode == ThemeMode::Dark;
+    const bool eye = mode == ThemeMode::EyeCare;
+    const QString background = dark ? QStringLiteral("#1E1E1E") : eye ? QStringLiteral("#FDF6E3") : QStringLiteral("#FFFFFF");
+    const QString surface = dark ? QStringLiteral("#25262B") : eye ? QStringLiteral("#F7EED6") : QStringLiteral("#F6F8FB");
+    const QString panel = dark ? QStringLiteral("#2D3038") : eye ? QStringLiteral("#F3E8C8") : QStringLiteral("#FFFFFF");
+    const QString foreground = dark ? QStringLiteral("#ECEFF5") : eye ? QStringLiteral("#3B3A32") : QStringLiteral("#202938");
+    const QString subtle = dark ? QStringLiteral("#A7B2C5") : eye ? QStringLiteral("#746951") : QStringLiteral("#637084");
+    const QString border = dark ? QStringLiteral("#424751") : eye ? QStringLiteral("#D2C29D") : QStringLiteral("#DDE4ED");
+    const QString accent = eye ? QStringLiteral("#5D8051") : QStringLiteral("#3079DD");
+    const QString accentHover = eye ? QStringLiteral("#4A6B40") : QStringLiteral("#2567C4");
+    const QString console = dark ? QStringLiteral("#17191E") : eye ? QStringLiteral("#FCF4DE") : QStringLiteral("#F9FBFE");
+
+    setStyleSheet(QStringLiteral(
+                      "QWidget#InteractiveJudgeRoot, QWidget#InteractiveJudgePage { background: %1; color: %4; }"
+                      "QFrame#InteractiveJudgeHero { background: %2; border: 1px solid %6; border-radius: 12px; }"
+                      "QLabel#InteractiveJudgeEyebrow { color: %7; font-size: 10px; font-weight: 700; letter-spacing: 1px; }"
+                      "QLabel#InteractiveJudgeHeadline { color: %4; font-size: 21px; font-weight: 700; }"
+                      "QLabel#InteractiveJudgeSubtitle { color: %5; font-size: 11px; }"
+                      "QGroupBox { color: %4; font-weight: 600; border: 1px solid %6; border-radius: 9px; margin-top: 12px; padding-top: 6px; background: %3; }"
+                      "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
+                      "QLabel { color: %4; background: transparent; }"
+                      "QLabel#InteractiveJudgeOptionLabel { color: %5; font-weight: 600; }"
+                      "QLineEdit { color: %4; background: %1; border: 1px solid %6; border-radius: 6px; padding: 5px 7px; min-height: 22px; selection-background-color: %7; }"
+                      "QLineEdit:focus { border: 1px solid %7; }"
+                      "QLineEdit:disabled { color: %5; }"
+                      "QWidget#InteractiveJudgeTimeLimitEditor { background: %1; border: 1px solid %6; border-radius: 7px; }"
+                      "QWidget#InteractiveJudgeTimeLimitEditor:hover { border-color: %5; }"
+                      "QSpinBox#InteractiveJudgeTimeLimitSpin { background: transparent; color: %4; border: none; padding: 4px 8px; selection-background-color: %7; }"
+                      "QToolButton#InteractiveJudgeTimeLimitUp, QToolButton#InteractiveJudgeTimeLimitDown { background: %2; color: %4; border: none; border-left: 1px solid %6; padding: 0; }"
+                      "QToolButton#InteractiveJudgeTimeLimitUp { border-bottom: 1px solid %6; border-top-right-radius: 6px; }"
+                      "QToolButton#InteractiveJudgeTimeLimitDown { border-bottom-right-radius: 6px; }"
+                      "QToolButton#InteractiveJudgeTimeLimitUp:hover, QToolButton#InteractiveJudgeTimeLimitDown:hover { background: %3; }"
+                      "QToolButton#InteractiveJudgeTimeLimitUp:pressed, QToolButton#InteractiveJudgeTimeLimitDown:pressed { background: %6; }"
+                      "QWidget#InteractiveJudgeTimeLimitEditor:disabled, QSpinBox#InteractiveJudgeTimeLimitSpin:disabled, QToolButton#InteractiveJudgeTimeLimitUp:disabled, QToolButton#InteractiveJudgeTimeLimitDown:disabled { color: %5; }"
+                      "QPushButton { padding: 7px 8px; min-height: 23px; border-radius: 6px; border: 1px solid %6; color: %4; background: %2; }"
+                      "QPushButton:hover { background: %3; border-color: %7; }"
+                      "QPushButton:disabled { color: %5; border-color: %6; }"
+                      "QPushButton#InteractiveJudgePrimary { background: %7; color: #FFFFFF; border: 1px solid %7; font-weight: bold; }"
+                      "QPushButton#InteractiveJudgePrimary:hover { background: %8; }"
+                      "QFrame#InteractiveJudgeResult { background: %2; border: 1px solid %6; border-radius: 9px; }"
+                      "QLabel#InteractiveJudgeVerdict { color: %4; font-size: 17px; font-weight: bold; }"
+                      "QLabel#InteractiveJudgeDetails, QLabel#InteractiveJudgeCaseStatus, QLabel#InteractiveJudgeInformation { color: %5; }"
+                      "QLabel#InteractiveJudgeSectionTitle { color: %4; font-size: 12px; font-weight: bold; }"
+                      "QPlainTextEdit { color: %4; background: %9; border: 1px solid %6; border-radius: 8px; padding: 7px; selection-background-color: %7; }"
+                      "QProgressBar { color: %4; background: %9; border: 1px solid %6; border-radius: 5px; text-align: center; min-height: 14px; }"
+                      "QProgressBar::chunk { background: %7; border-radius: 4px; }"
+                      "QScrollArea { background: %1; border: none; }"
+                      "QScrollBar:vertical { background: %1; width: 9px; }"
+                      "QScrollBar::handle:vertical { background: %6; min-height: 22px; border-radius: 4px; }"
+                      "QScrollBar:horizontal { background: %1; height: 9px; }"
+                      "QScrollBar::handle:horizontal { background: %6; min-width: 22px; border-radius: 4px; }" )
+                      .arg(background, surface, panel, foreground, subtle, border, accent, accentHover, console));
+    setResult(m_verdict->text(), m_details->text());
+}
+
+void InteractiveJudgeWidget::selectPath(QLineEdit *edit, const QString &title, const QString &filter)
+{
+    const QString previous = edit->text().trimmed();
+    const QString initial = previous.isEmpty() ? QDir::homePath() : QFileInfo(previous).absoluteFilePath();
+    const QString path = QFileDialog::getOpenFileName(this, title, initial, filter);
+    if (!path.isEmpty())
+    {
+        edit->setText(QDir::toNativeSeparators(path));
+    }
+}
+
+void InteractiveJudgeWidget::savePreferences() const
+{
+    QSettings preferences(QStringLiteral("CompilerIDE"), QStringLiteral("Compiler IDE 2.8.6"));
+    preferences.setValue(QStringLiteral("interactiveJudge/solution"), m_solutionPath->text().trimmed());
+    preferences.setValue(QStringLiteral("interactiveJudge/interactor"), m_interactorPath->text().trimmed());
+    preferences.setValue(QStringLiteral("interactiveJudge/input"), m_inputPath->text().trimmed());
+    preferences.setValue(QStringLiteral("interactiveJudge/answer"), m_answerPath->text().trimmed());
+    preferences.setValue(QStringLiteral("interactiveJudge/arguments"), m_arguments->text());
+    preferences.setValue(QStringLiteral("interactiveJudge/mode"), m_mode->currentIndex());
+    preferences.setValue(QStringLiteral("interactiveJudge/timeLimit"), m_timeLimit->value());
+}
+
+bool InteractiveJudgeWidget::prepareExecutable(const QString &source, const QString &name,
+                                               QString &executable, QString &error)
+{
+    const QFileInfo file(source.trimmed());
+    if (!file.exists() || !file.isFile())
+    {
+        error = tr("%1不存在：%2").arg(name, source);
+        return false;
+    }
+
+    const QString extension = file.suffix().toLower();
+    if (extension == QStringLiteral("exe"))
+    {
+        executable = file.absoluteFilePath();
+        return true;
+    }
+    if (extension != QStringLiteral("cpp") && extension != QStringLiteral("cc") &&
+        extension != QStringLiteral("cxx"))
+    {
+        error = tr("%1应为 .cpp / .cc / .cxx / .exe 文件").arg(name);
+        return false;
+    }
+
+    executable = QDir(m_tempDirectory->path()).filePath(
+        name == tr("选手程序") ? QStringLiteral("participant.exe") : QStringLiteral("interactor.exe"));
+    m_compileJobs.append({file.absoluteFilePath(), executable, name});
+    return true;
+}
+
+bool InteractiveJudgeWidget::prepareCases(QString &error)
+{
+    m_cases.clear();
+    const QString input = m_inputPath->text().trimmed();
+    const QString answer = m_answerPath->text().trimmed();
+    if (!answer.isEmpty() && (!QFileInfo(answer).exists() || !QFileInfo(answer).isFile()))
+    {
+        error = tr("答案文件不存在：%1").arg(answer);
+        return false;
+    }
+
+    if (input.isEmpty())
+    {
+        const QString emptyFile = QDir(m_tempDirectory->path()).filePath(QStringLiteral("empty.in"));
+        QFile file(emptyFile);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        {
+            error = tr("无法创建空测试数据：%1").arg(file.errorString());
+            return false;
+        }
+        file.close();
+        m_cases.append({emptyFile, answer, tr("默认空输入")});
+        return true;
+    }
+
+    QFileInfo source(input);
+    if (!source.exists())
+    {
+        error = tr("测试输入不存在：%1").arg(input);
+        return false;
+    }
+
+    if (source.isFile())
+    {
+        QString answerFile = answer;
+        if (answerFile.isEmpty())
+        {
+            const QString paired = source.dir().filePath(source.completeBaseName() + QStringLiteral(".ans"));
+            if (QFileInfo::exists(paired))
+            {
+                answerFile = paired;
+            }
+        }
+        m_cases.append({source.absoluteFilePath(), answerFile, source.fileName()});
+    }
+    else if (source.isDir())
+    {
+        QDir directory(source.absoluteFilePath());
+        const QFileInfoList dataFiles = directory.entryInfoList(
+            {QStringLiteral("*.in"), QStringLiteral("*.txt")}, QDir::Files | QDir::Readable, QDir::Name);
+        for (const QFileInfo &file : dataFiles)
+        {
+            QString answerFile = answer;
+            if (answerFile.isEmpty())
+            {
+                const QString paired = directory.filePath(file.completeBaseName() + QStringLiteral(".ans"));
+                if (QFileInfo::exists(paired))
+                {
+                    answerFile = paired;
+                }
+            }
+            m_cases.append({file.absoluteFilePath(), answerFile, file.fileName()});
+        }
+    }
+
+    if (m_cases.isEmpty())
+    {
+        error = tr("未找到测试数据，请选择 .in / .txt 文件或包含这些文件的目录");
+        return false;
+    }
+    return true;
+}
+
+void InteractiveJudgeWidget::startChecking()
+{
+    if (m_phase == Phase::Compiling || m_phase == Phase::Preparing ||
+        m_phase == Phase::Starting || m_phase == Phase::Running)
+    {
+        return;
+    }
+
+    savePreferences();
+    ++m_generation;
+    releaseProcess(m_compiler);
+    releaseProcesses();
+    m_tempDirectory.reset(new QTemporaryDir(QDir::tempPath() + QStringLiteral("/CompilerIDE_Interactive_XXXXXX")));
+    if (!m_tempDirectory->isValid())
+    {
+        setResult(tr("无法开始"), tr("无法创建交互题临时目录"));
+        return;
+    }
+
+    m_compileJobs.clear();
+    m_solutionExe.clear();
+    m_interactorExe.clear();
+    m_compileIndex = 0;
+    m_caseIndex = 0;
+    m_passed = 0;
+    m_transcriptBytes = 0;
+    m_pendingTranscript.clear();
+    m_transcript->clear();
+
+    QString error;
+    if (!prepareExecutable(m_solutionPath->text(), tr("选手程序"), m_solutionExe, error) ||
+        !prepareExecutable(m_interactorPath->text(), tr("交互器"), m_interactorExe, error) ||
+        !prepareCases(error))
+    {
+        setResult(tr("配置有误"), error);
+        appendEvent(error);
+        return;
+    }
+
+    m_progress->setRange(0, m_cases.size());
+    m_progress->setValue(0);
+    m_startButton->setEnabled(false);
+    m_stopButton->setEnabled(true);
+    m_filesGroup->setEnabled(false);
+    m_mode->setEnabled(false);
+    m_timeLimit->setEnabled(false);
+    m_timeLimit->parentWidget()->setEnabled(false);
+    m_arguments->setEnabled(false);
+    m_phase = Phase::Preparing;
+    setResult(tr("检查进行中"), tr("共 %1 个测试点").arg(m_cases.size()));
+    appendEvent(tr("准备完成：%1 个测试点，单组限制 %2 ms")
+                    .arg(m_cases.size()).arg(m_timeLimit->value()));
+    m_watchdog->start();
+    startNextCompilation();
+}
+
+void InteractiveJudgeWidget::startNextCompilation()
+{
+    if (m_phase != Phase::Preparing && m_phase != Phase::Compiling)
+    {
+        return;
+    }
+    if (m_compileIndex >= m_compileJobs.size())
+    {
+        m_phase = Phase::Preparing;
+        startNextCase();
+        return;
+    }
+
+    const CompileJob job = m_compileJobs.at(m_compileIndex);
+    m_phase = Phase::Compiling;
+    setResult(tr("正在编译"), job.name + QStringLiteral(" · ") + QFileInfo(job.sourcePath).fileName());
+    appendEvent(tr("编译 %1：%2").arg(job.name, job.sourcePath));
+
+    QStringList arguments;
+    const QString standard = m_ide->getCppStandard();
+    if (m_ide->getCompilerType() == QStringLiteral("msvc"))
+    {
+        arguments << QStringLiteral("/nologo") << QStringLiteral("/EHsc")
+                  << QStringLiteral("/utf-8") << QStringLiteral("/TP");
+        if (standard == QStringLiteral("c++17") || standard == QStringLiteral("c++20"))
+        {
+            arguments << QStringLiteral("/std:") + standard;
+        }
+        else if (standard == QStringLiteral("c++23"))
+        {
+            arguments << QStringLiteral("/std:c++latest");
+        }
+        arguments << QStringLiteral("/I") + QFileInfo(job.sourcePath).absolutePath();
+        arguments << QStringLiteral("/Fo:") + QDir(m_tempDirectory->path()).filePath(QStringLiteral("obj_%1.obj").arg(m_compileIndex));
+        arguments << QStringLiteral("/Fe:") + job.outputPath << job.sourcePath;
+    }
+    else
+    {
+        if (standard == QStringLiteral("c++14") || standard == QStringLiteral("c++17") ||
+            standard == QStringLiteral("c++20"))
+        {
+            arguments << QStringLiteral("-std=") + standard;
+        }
+        else if (standard == QStringLiteral("c++23"))
+        {
+            arguments << QStringLiteral("-std=c++23");
+        }
+        arguments << QStringLiteral("-O2") << QStringLiteral("-I")
+                  << QFileInfo(job.sourcePath).absolutePath() << job.sourcePath
+                  << QStringLiteral("-o") << job.outputPath;
+    }
+
+    QProcess *process = new QProcess(this);
+    m_compiler = process;
+    process->setWorkingDirectory(m_tempDirectory->path());
+    process->setProcessChannelMode(QProcess::MergedChannels);
+    const quint64 generation = m_generation;
+    connect(process, &QProcess::finished, this,
+            [this, process, generation](int code, QProcess::ExitStatus exitStatus)
+            {
+                if (generation != m_generation || m_compiler != process || m_phase != Phase::Compiling)
+                {
+                    return;
+                }
+                const QString output = QString::fromLocal8Bit(process->readAllStandardOutput());
+                if (!output.trimmed().isEmpty())
+                {
+                    appendEvent(output.left(16000));
+                }
+                m_compiler = nullptr;
+                process->deleteLater();
+                const CompileJob finishedJob = m_compileJobs.at(m_compileIndex);
+                if (code != 0 || exitStatus != QProcess::NormalExit || !QFileInfo::exists(finishedJob.outputPath))
+                {
+                    finishChecking(tr("CE · 编译失败"), tr("%1 编译失败（退出码 %2），请查看记录").arg(finishedJob.name).arg(code));
+                    return;
+                }
+                appendEvent(tr("%1 编译成功").arg(finishedJob.name));
+                ++m_compileIndex;
+                m_phase = Phase::Preparing;
+                startNextCompilation();
+            });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process, generation](QProcess::ProcessError processError)
+            {
+                if (generation != m_generation || m_compiler != process || m_phase != Phase::Compiling)
+                {
+                    return;
+                }
+                if (processError == QProcess::FailedToStart)
+                {
+                    finishChecking(tr("CE · 编译器无法启动"), process->errorString());
+                }
+            });
+    m_stageClock.restart();
+    const QString compilerPath = m_ide->getCompilerPath().trimmed();
+    if (compilerPath.isEmpty())
+    {
+        finishChecking(tr("CE · 未配置编译器"), tr("请先在 IDE 设置中配置 C++ 编译器"));
+        return;
+    }
+    process->start(compilerPath, arguments);
+}
+
+void InteractiveJudgeWidget::configureProcess(QProcess *process, bool contestant, quint64 generation)
+{
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    connect(process, &QProcess::started, this, [this, contestant, generation]()
+            {
+                if (generation != m_generation || m_phase != Phase::Starting)
+                {
+                    return;
+                }
+                if (contestant)
+                {
+                    m_solutionStarted = true;
+                }
+                else
+                {
+                    m_interactorStarted = true;
+                }
+                if (m_solutionStarted && m_interactorStarted)
+                {
+                    m_phase = Phase::Running;
+                    m_caseClock.restart();
+                    setResult(tr("正在交互"), tr("运行 %1").arg(m_cases.at(m_caseIndex).name));
+                    pumpChannels();
+                }
+            });
+    connect(process, &QProcess::readyReadStandardOutput, this, [this, contestant, generation]()
+            {
+                if (generation == m_generation)
+                {
+                    handleOutput(contestant);
+                }
+            });
+    connect(process, &QProcess::readyReadStandardError, this, [this, contestant, generation]()
+            {
+                if (generation == m_generation)
+                {
+                    handleErrorOutput(contestant);
+                }
+            });
+    connect(process, &QProcess::bytesWritten, this, [this, generation](qint64)
+            {
+                if (generation == m_generation)
+                {
+                    pumpChannels();
+                }
+            });
+    connect(process, &QProcess::finished, this,
+            [this, contestant, generation](int code, QProcess::ExitStatus exitStatus)
+            {
+                if (generation == m_generation)
+                {
+                    handleProcessFinished(contestant, code, exitStatus);
+                }
+            });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process, contestant, generation](QProcess::ProcessError error)
+            {
+                if (generation != m_generation ||
+                    (m_phase != Phase::Starting && m_phase != Phase::Running))
+                {
+                    return;
+                }
+                if (error == QProcess::FailedToStart)
+                {
+                    completeCase(tr("启动失败"), tr("%1：%2")
+                                     .arg(contestant ? tr("选手程序") : tr("交互器"), process->errorString()), false);
+                }
+            });
+}
+
+void InteractiveJudgeWidget::startNextCase()
+{
+    if (m_phase != Phase::Preparing)
+    {
+        return;
+    }
+    if (m_caseIndex >= m_cases.size())
+    {
+        finishChecking(tr("AC · 全部通过"), tr("%1/%2 组通过").arg(m_passed).arg(m_cases.size()));
+        return;
+    }
+
+    ++m_generation;
+    const quint64 generation = m_generation;
+    const TestCase test = m_cases.at(m_caseIndex);
+    const QString caseName = QStringLiteral("case_%1.log").arg(m_caseIndex + 1);
+    m_outputLogPath = QDir(m_tempDirectory->path()).filePath(caseName);
+    QFile outputFile(m_outputLogPath);
+    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        finishChecking(tr("IO 错误"), tr("无法创建交互日志：%1").arg(outputFile.errorString()));
+        return;
+    }
+    outputFile.close();
+
+    m_solutionError.clear();
+    m_interactorError.clear();
+    m_toSolution.clear();
+    m_toInteractor.clear();
+    m_solutionStarted = false;
+    m_interactorStarted = false;
+    m_solutionFinished = false;
+    m_interactorFinished = false;
+    m_solutionInputClosed = false;
+    m_interactorInputClosed = false;
+    m_solutionExitCode = -1;
+    m_interactorExitCode = -1;
+    m_solutionExitStatus = QProcess::NormalExit;
+    m_interactorExitStatus = QProcess::NormalExit;
+    m_solutionBytes = 0;
+    m_interactorBytes = 0;
+    m_caseStatus->setText(tr("测试点 %1/%2：%3")
+                              .arg(m_caseIndex + 1).arg(m_cases.size()).arg(test.name));
+    appendEvent(tr("──── 测试点 %1/%2：%3 ────")
+                    .arg(m_caseIndex + 1).arg(m_cases.size()).arg(test.name));
+
+    QStringList arguments;
+    if (m_mode->currentIndex() == 0)
+    {
+        arguments << test.inputPath << m_outputLogPath;
+        if (!test.answerPath.isEmpty())
+        {
+            arguments << QFileInfo(test.answerPath).absoluteFilePath();
+        }
+    }
+    else
+    {
+        QString custom = m_arguments->text();
+        const QString quotedInput = QStringLiteral("\"") + test.inputPath + QStringLiteral("\"");
+        const QString quotedOutput = QStringLiteral("\"") + m_outputLogPath + QStringLiteral("\"");
+        const QString quotedAnswer = test.answerPath.isEmpty()
+                                         ? QStringLiteral("\"\"")
+                                         : QStringLiteral("\"") + QFileInfo(test.answerPath).absoluteFilePath() + QStringLiteral("\"");
+        custom.replace(QStringLiteral("\"{input}\""), quotedInput);
+        custom.replace(QStringLiteral("\"{output}\""), quotedOutput);
+        custom.replace(QStringLiteral("\"{answer}\""), quotedAnswer);
+        custom.replace(QStringLiteral("{input}"), quotedInput);
+        custom.replace(QStringLiteral("{output}"), quotedOutput);
+        custom.replace(QStringLiteral("{answer}"), quotedAnswer);
+        arguments = QProcess::splitCommand(custom);
+    }
+
+    m_solution = new QProcess(this);
+    m_interactor = new QProcess(this);
+    const QString workingDirectory = QFileInfo(test.inputPath).absolutePath();
+    m_solution->setWorkingDirectory(workingDirectory);
+    m_interactor->setWorkingDirectory(workingDirectory);
+    configureProcess(m_solution, true, generation);
+    configureProcess(m_interactor, false, generation);
+    m_phase = Phase::Starting;
+    m_stageClock.restart();
+    setResult(tr("正在启动"), tr("启动测试点 %1").arg(test.name));
+    m_solution->start(m_solutionExe);
+    if (m_phase == Phase::Starting)
+    {
+        m_interactor->start(m_interactorExe, arguments);
+    }
+}
+
+void InteractiveJudgeWidget::handleOutput(bool contestant)
+{
+    if (m_phase != Phase::Running && m_phase != Phase::Starting)
+    {
+        return;
+    }
+    QProcess *source = contestant ? m_solution : m_interactor;
+    if (!source)
+    {
+        return;
+    }
+    const QByteArray data = source->readAllStandardOutput();
+    if (data.isEmpty())
+    {
+        return;
+    }
+
+    qint64 &total = contestant ? m_solutionBytes : m_interactorBytes;
+    QByteArray &queue = contestant ? m_toInteractor : m_toSolution;
+    total += data.size();
+    if (total > 32LL * 1024 * 1024 || queue.size() + data.size() > 4 * 1024 * 1024)
+    {
+        completeCase(tr("OLE · 输出超限"), tr("交互数据超过 32 MiB 或管道待转发数据过多"), false);
+        return;
+    }
+    queue.append(data);
+    appendTraffic(contestant ? tr("选手 → 交互器") : tr("交互器 → 选手"), data);
+    pumpChannels();
+}
+
+void InteractiveJudgeWidget::handleErrorOutput(bool contestant)
+{
+    if (m_phase != Phase::Running && m_phase != Phase::Starting)
+    {
+        return;
+    }
+    QProcess *process = contestant ? m_solution : m_interactor;
+    if (!process)
+    {
+        return;
+    }
+    const QByteArray data = process->readAllStandardError();
+    if (data.isEmpty())
+    {
+        return;
+    }
+    QString &savedError = contestant ? m_solutionError : m_interactorError;
+    if (savedError.size() < 32768)
+    {
+        savedError += QString::fromLocal8Bit(data.left(32768 - savedError.size()));
+    }
+    appendTraffic(contestant ? tr("选手 stderr") : tr("交互器 stderr"), data);
+}
+
+void InteractiveJudgeWidget::pumpChannels()
+{
+    if (m_phase != Phase::Running && m_phase != Phase::Starting)
+    {
+        return;
+    }
+    auto send = [](QProcess *destination, QByteArray &queue)
+    {
+        if (!destination || destination->state() != QProcess::Running || queue.isEmpty())
+        {
+            return;
+        }
+        const qint64 allowance = 256 * 1024 - destination->bytesToWrite();
+        if (allowance <= 0)
+        {
+            return;
+        }
+        const qint64 amount = qMin(allowance, static_cast<qint64>(queue.size()));
+        const qint64 written = destination->write(queue.constData(), amount);
+        if (written > 0)
+        {
+            queue.remove(0, static_cast<qsizetype>(written));
+        }
+    };
+
+    if (!m_interactorFinished)
+    {
+        send(m_interactor, m_toInteractor);
+    }
+    if (!m_solutionFinished)
+    {
+        send(m_solution, m_toSolution);
+    }
+    if (m_solutionFinished && !m_interactorInputClosed && m_toInteractor.isEmpty() &&
+        m_interactor && m_interactor->state() == QProcess::Running)
+    {
+        m_interactorInputClosed = true;
+        m_interactor->closeWriteChannel();
+    }
+    if (m_interactorFinished && !m_solutionInputClosed && m_toSolution.isEmpty() &&
+        m_solution && m_solution->state() == QProcess::Running)
+    {
+        m_solutionInputClosed = true;
+        m_solution->closeWriteChannel();
+    }
+}
+
+void InteractiveJudgeWidget::handleProcessFinished(bool contestant, int exitCode,
+                                                   QProcess::ExitStatus status)
+{
+    if (m_phase != Phase::Running && m_phase != Phase::Starting)
+    {
+        return;
+    }
+    handleOutput(contestant);
+    if (m_phase != Phase::Running && m_phase != Phase::Starting)
+    {
+        return;
+    }
+    handleErrorOutput(contestant);
+    if (contestant)
+    {
+        m_solutionFinished = true;
+        m_solutionExitCode = exitCode;
+        m_solutionExitStatus = status;
+    }
+    else
+    {
+        m_interactorFinished = true;
+        m_interactorExitCode = exitCode;
+        m_interactorExitStatus = status;
+    }
+
+    appendEvent(tr("%1退出：%2（退出码 %3）")
+                    .arg(contestant ? tr("选手程序") : tr("交互器"),
+                         status == QProcess::NormalExit ? tr("正常") : tr("崩溃"))
+                    .arg(exitCode));
+    pumpChannels();
+
+    if (m_interactorFinished && m_interactorExitStatus != QProcess::NormalExit)
+    {
+        completeCase(tr("IE · 交互器崩溃"), errorSummary(), false);
+        return;
+    }
+    if (m_interactorFinished && m_interactorExitCode != 0)
+    {
+        const QString verdict = m_interactorExitCode == 1 ? tr("WA · 答案错误")
+                                : m_interactorExitCode == 2 ? tr("PE · 输出格式错误")
+                                : m_interactorExitCode == 3 ? tr("IE · 交互器错误")
+                                                             : tr("未通过 · 交互器返回 %1").arg(m_interactorExitCode);
+        completeCase(verdict, errorSummary(), false);
+        return;
+    }
+    if (m_solutionFinished && (m_solutionExitCode != 0 || m_solutionExitStatus != QProcess::NormalExit))
+    {
+        completeCase(tr("RE · 运行错误"), tr("选手程序异常退出（退出码 %1）。%2")
+                                              .arg(m_solutionExitCode).arg(errorSummary()), false);
+        return;
+    }
+    if (m_solutionFinished && m_interactorFinished)
+    {
+        completeCase(tr("AC · 通过"), errorSummary(), true);
+    }
+}
+
+void InteractiveJudgeWidget::completeCase(const QString &verdict, const QString &detail, bool passed)
+{
+    if (m_phase != Phase::Running && m_phase != Phase::Starting)
+    {
+        return;
+    }
+    ++m_generation;
+    m_phase = Phase::Preparing;
+    if (passed)
+    {
+        ++m_passed;
+    }
+    appendEvent(tr("结果：%1").arg(verdict));
+    if (!detail.trimmed().isEmpty())
+    {
+        appendEvent(detail.left(4096));
+    }
+
+    const QString outputFile = m_outputLogPath;
+    releaseProcesses();
+    QFile report(outputFile);
+    if (report.open(QIODevice::ReadOnly))
+    {
+        const QString reportText = QString::fromLocal8Bit(report.read(16384)).trimmed();
+        if (!reportText.isEmpty())
+        {
+            appendEvent(tr("交互器日志：%1").arg(reportText));
+        }
+    }
+    m_progress->setValue(m_caseIndex + 1);
+    m_caseStatus->setText(tr("已完成 %1/%2 · 已通过 %3")
+                              .arg(m_caseIndex + 1).arg(m_cases.size()).arg(m_passed));
+    flushTranscript();
+
+    if (!passed)
+    {
+        finishChecking(verdict, tr("失败于 %1（测试点 %2/%3）\n%4")
+                                    .arg(m_cases.at(m_caseIndex).name)
+                                    .arg(m_caseIndex + 1)
+                                    .arg(m_cases.size())
+                                    .arg(detail.left(1024)));
+        return;
+    }
+
+    ++m_caseIndex;
+    if (m_caseIndex == m_cases.size())
+    {
+        finishChecking(tr("AC · 全部通过"), tr("%1/%2 个测试点通过")
+                                                  .arg(m_passed).arg(m_cases.size()));
+        return;
+    }
+    setResult(tr("检查进行中"), tr("测试点 %1 通过，正在准备下一组").arg(m_caseIndex));
+    const quint64 generation = m_generation;
+    QTimer::singleShot(0, this, [this, generation]()
+                       {
+                           if (generation == m_generation && m_phase == Phase::Preparing)
+                           {
+                               startNextCase();
+                           }
+                       });
+}
+
+void InteractiveJudgeWidget::finishChecking(const QString &verdict, const QString &detail, bool stopped)
+{
+    if (stopped && m_phase != Phase::Compiling && m_phase != Phase::Preparing &&
+        m_phase != Phase::Starting && m_phase != Phase::Running)
+    {
+        return;
+    }
+    ++m_generation;
+    m_phase = Phase::Finished;
+    if (m_watchdog)
+    {
+        m_watchdog->stop();
+    }
+    releaseProcess(m_compiler);
+    releaseProcesses();
+    m_startButton->setEnabled(true);
+    m_stopButton->setEnabled(false);
+    m_filesGroup->setEnabled(true);
+    m_mode->setEnabled(true);
+    m_timeLimit->parentWidget()->setEnabled(true);
+    m_timeLimit->setEnabled(true);
+    m_arguments->setEnabled(m_mode->currentIndex() == 1);
+    setResult(verdict, detail);
+    appendEvent(tr("检查结束：%1").arg(verdict));
+    flushTranscript();
+}
+
+void InteractiveJudgeWidget::releaseProcess(QProcess *&process)
+{
+    if (!process)
+    {
+        return;
+    }
+    QProcess *old = process;
+    process = nullptr;
+    old->disconnect(this);
+    if (old->state() != QProcess::NotRunning)
+    {
+        old->kill();
+        old->waitForFinished(250);
+    }
+    old->deleteLater();
+}
+
+void InteractiveJudgeWidget::releaseProcesses()
+{
+    releaseProcess(m_solution);
+    releaseProcess(m_interactor);
+    m_toSolution.clear();
+    m_toInteractor.clear();
+}
+
+void InteractiveJudgeWidget::appendEvent(const QString &event)
+{
+    const QString line = QStringLiteral("[系统] ") + event;
+    if (m_transcriptBytes < 192 * 1024)
+    {
+        const QString clipped = line.left(static_cast<int>(qMin<qint64>(line.size(), 192 * 1024 - m_transcriptBytes)));
+        m_pendingTranscript.append(clipped + QLatin1Char('\n'));
+        m_transcriptBytes += clipped.size();
+    }
+}
+
+void InteractiveJudgeWidget::appendTraffic(const QString &sender, const QByteArray &bytes)
+{
+    if (bytes.isEmpty() || m_transcriptBytes >= 192 * 1024)
+    {
+        return;
+    }
+    const qint64 allowance = 192 * 1024 - m_transcriptBytes;
+    const QString text = QString::fromLocal8Bit(bytes.left(qMin<qint64>(bytes.size(), allowance)));
+    const QString sanitized = QString(text).replace(QChar::Null, QChar(0xFFFD));
+    m_pendingTranscript.append(QStringLiteral("[") + sender + QStringLiteral("] ") + sanitized);
+    if (!sanitized.endsWith(QLatin1Char('\n')))
+    {
+        m_pendingTranscript.append(QLatin1Char('\n'));
+    }
+    m_transcriptBytes += text.size();
+    if (m_transcriptBytes >= 192 * 1024)
+    {
+        m_pendingTranscript.append(tr("[系统] 记录已截断，管道转发继续正常进行。\n"));
+    }
+}
+
+void InteractiveJudgeWidget::flushTranscript()
+{
+    if (m_pendingTranscript.isEmpty())
+    {
+        return;
+    }
+    const bool atBottom = m_transcript->verticalScrollBar()->value() >=
+                          m_transcript->verticalScrollBar()->maximum() - 8;
+    QTextCursor cursor = m_transcript->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(m_pendingTranscript);
+    m_pendingTranscript.clear();
+    if (atBottom)
+    {
+        m_transcript->verticalScrollBar()->setValue(m_transcript->verticalScrollBar()->maximum());
+    }
+}
+
+void InteractiveJudgeWidget::setResult(const QString &status, const QString &detail)
+{
+    m_verdict->setText(status);
+    m_details->setText(detail);
+    const bool success = status.startsWith(QStringLiteral("AC"));
+    const bool failed = status.startsWith(QStringLiteral("WA")) ||
+                        status.startsWith(QStringLiteral("PE")) ||
+                        status.startsWith(QStringLiteral("RE")) ||
+                        status.startsWith(QStringLiteral("TLE")) ||
+                        status.startsWith(QStringLiteral("CE")) ||
+                        status.startsWith(QStringLiteral("IE")) ||
+                        status.startsWith(QStringLiteral("OLE")) ||
+                        status.startsWith(tr("配置有误")) ||
+                        status.startsWith(tr("启动失败")) ||
+                        status.startsWith(tr("IO 错误")) ||
+                        status.startsWith(tr("未通过"));
+    const QString color = success ? (m_theme == ThemeMode::Dark ? QStringLiteral("#69DB9A") : QStringLiteral("#27824E"))
+                          : failed ? (m_theme == ThemeMode::Dark ? QStringLiteral("#FF8794") : QStringLiteral("#C73848"))
+                                   : (m_theme == ThemeMode::Dark ? QStringLiteral("#8BB9FF") : QStringLiteral("#3176C5"));
+    m_verdict->setStyleSheet(QStringLiteral("color: %1; font-size: 17px; font-weight: bold;").arg(color));
+}
+
+QString InteractiveJudgeWidget::errorSummary() const
+{
+    QStringList parts;
+    if (!m_interactorError.trimmed().isEmpty())
+    {
+        parts << tr("交互器：%1").arg(m_interactorError.trimmed().left(2048));
+    }
+    if (!m_solutionError.trimmed().isEmpty())
+    {
+        parts << tr("选手程序：%1").arg(m_solutionError.trimmed().left(1024));
+    }
+    return parts.isEmpty() ? tr("请查看交互记录和退出码") : parts.join(QLatin1Char('\n'));
+}
+
 CheckerWidget::CheckerWidget(CompilerIDE *ide, QWidget *parent)
     : QWidget(parent), mainWindow(ide),
       compileProcess(nullptr), dataProcess(nullptr), stdProcess(nullptr), solProcess(nullptr),
@@ -32384,7 +42722,8 @@ void CheckerWidget::setTheme(bool dark)
             "QLabel {"
             "   background-color: #5A3E2B;"
             "   color: #FFD700;"
-            "   border: 1px solid #B8860B;"
+
+"   border: 1px solid #B8860B;"
             "   border-radius: 5px;"
             "   padding: 8px;"
             "   margin-top: 10px;"
@@ -33384,7 +43723,8 @@ void CheckerWidget::launchParallelTask()
 void CheckerWidget::startParallelData(ParallelTask *task)
 {
     if (!task || task->finished || stopRequested || parallelFailed)
-    {
+
+{
         return;
     }
 
@@ -33811,22 +44151,78 @@ void CheckerWidget::updateProgressDisplay()
 {
 }
 
+static int compilerIdeRunInConsole(const QString &fileName, unsigned int codePage)
+{
+    if (!GetConsoleWindow() && !AttachConsole(ATTACH_PARENT_PROCESS) && !AllocConsole())
+    {
+        return 1;
+    }
+
+    SetConsoleOutputCP(codePage);
+    SetConsoleCP(codePage);
+    const std::wstring fullPath = QDir::toNativeSeparators(QFileInfo(fileName).absoluteFilePath()).toStdWString();
+    const std::wstring workingDirectory = QDir::toNativeSeparators(QFileInfo(fileName).absolutePath()).toStdWString();
+    const std::wstring title = L"CompilerIDE - " + QFileInfo(fileName).fileName().toStdWString();
+    SetConsoleTitleW(title.c_str());
+
+    STARTUPINFOW startup = {};
+    PROCESS_INFORMATION child = {};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    std::wstring commandLine = L"\"" + fullPath + L"\"";
+    SetEnvironmentVariableW(L"__COMPILERIDE_RUN_HOST", nullptr);
+    SetEnvironmentVariableW(L"__COMPILERIDE_RUN_TARGET", nullptr);
+    SetEnvironmentVariableW(L"__COMPILERIDE_RUN_CODEPAGE", nullptr);
+    const BOOL started = CreateProcessW(fullPath.c_str(), commandLine.data(), nullptr,
+                                        nullptr, TRUE, 0, nullptr, workingDirectory.c_str(),
+                                        &startup, &child);
+    const DWORD startError = started ? ERROR_SUCCESS : GetLastError();
+    DWORD resultCode = 1;
+    if (started)
+    {
+        CloseHandle(child.hThread);
+        WaitForSingleObject(child.hProcess, INFINITE);
+        GetExitCodeProcess(child.hProcess, &resultCode);
+        CloseHandle(child.hProcess);
+    }
+
+    std::wstring message = started
+        ? L"\r\n程序已退出，返回代码: " + std::to_wstring(resultCode) + L"\r\n"
+        : L"\r\n程序启动失败，Windows 错误代码: " + std::to_wstring(startError) + L"\r\n";
+    message += L"按 Enter 关闭窗口...";
+    DWORD written = 0;
+    WriteConsoleW(GetStdHandle(STD_OUTPUT_HANDLE), message.c_str(),
+                  static_cast<DWORD>(message.size()), &written, nullptr);
+    wchar_t inputBuffer[32] = {};
+    DWORD readCount = 0;
+    ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), inputBuffer, 32, &readCount, nullptr);
+    FreeConsole();
+    return started ? static_cast<int>(resultCode) : 1;
+}
+
+
 int main(int argc, char *argv[])
 {
-    qunsetenv("QT_QPA_PLATFORM_PLUGIN_PATH");
-    qunsetenv("QT_PLUGIN_PATH");
-    QString mingwPath = "D:/Qt/6.11.0/msvc2022_64/plugins";
-    QDir mingwDir(mingwPath);
-    if (mingwDir.exists() && mingwDir.exists("platforms/qwindows.dll"))
+#ifdef Q_OS_WIN
+    int wideArgc = 0;
+    LPWSTR *wideArgv = CommandLineToArgvW(GetCommandLineW(), &wideArgc);
+    if (wideArgv)
     {
-        qputenv("QT_QPA_PLATFORM_PLUGIN_PATH", mingwPath.toUtf8());
-        qDebug() << "Development: Using MinGW plugins";
+        if (wideArgc == 4 && wcscmp(wideArgv[1], L"--compileride-console-run") == 0)
+        {
+            const QString targetFile = QString::fromWCharArray(wideArgv[2]);
+            bool validCodePage = false;
+            const unsigned int parsedCodePage = QString::fromWCharArray(wideArgv[3]).toUInt(&validCodePage);
+            LocalFree(wideArgv);
+            return compilerIdeRunInConsole(targetFile, validCodePage ? parsedCodePage : 65001);
+        }
+        LocalFree(wideArgv);
     }
-    qputenv("QT_DEBUG_PLUGINS", "1");
+#endif
     QApplication app(argc, argv);
-    qDebug() << "Library paths:" << app.libraryPaths();
-    qDebug() << "Plugin path env:" << qgetenv("QT_QPA_PLATFORM_PLUGIN_PATH");
-
     QApplication::setOrganizationName("CompilerIDE");
     QApplication::setApplicationName("Compiler IDE " + IDE_VERSION);
     QApplication::setApplicationVersion(IDE_VERSION);
@@ -33840,19 +44236,58 @@ int main(int argc, char *argv[])
     bool enableSplash = settings.value("enableSplash", false).toBool();
     bool enableWelcome = settings.value("enableWelcome", true).toBool();
 
+    const QStringList startupFiles = QCoreApplication::arguments().mid(1);
+
+#ifdef Q_OS_WIN
+    const QString currentWorkingDirectory = QDir::cleanPath(QDir::currentPath());
+    const QString windowsDirectory = QDir::cleanPath(qEnvironmentVariable("SystemRoot"));
+    if (!windowsDirectory.isEmpty())
+    {
+        const QString systemDirectory = windowsDirectory + QStringLiteral("/System32");
+        const QString sysWOW64Directory = windowsDirectory + QStringLiteral("/SysWOW64");
+        const bool inSystemDirectory =
+            currentWorkingDirectory.compare(systemDirectory, Qt::CaseInsensitive) == 0 ||
+            currentWorkingDirectory.compare(sysWOW64Directory, Qt::CaseInsensitive) == 0;
+        if (inSystemDirectory)
+        {
+            QString workingDirectory = QCoreApplication::applicationDirPath();
+            for (const QString &startupFile : startupFiles)
+            {
+                const QFileInfo startupFileInfo(startupFile);
+                if (startupFileInfo.exists() && startupFileInfo.isFile())
+                {
+                    workingDirectory = startupFileInfo.absolutePath();
+                    break;
+                }
+            }
+            if (!workingDirectory.isEmpty())
+            {
+                QDir::setCurrent(workingDirectory);
+            }
+        }
+    }
+#endif
+
     CompilerIDE *ide = new CompilerIDE();
 
-    if (argc > 1)
+    if (!startupFiles.isEmpty())
     {
         ide->showMaximized();
         ide->show();
         ide->raise();
         ide->activateWindow();
-        ide->loadFile(argv[1]);
+        for (const QString &filePath : startupFiles)
+        {
+            const QFileInfo fileInfo(filePath);
+            if (fileInfo.exists() && fileInfo.isFile())
+            {
+                ide->loadFile(fileInfo.absoluteFilePath());
+            }
+        }
         QTimer::singleShot(500, ide, [ide]()
-                           {
+                            {
                                ide->autoCheckForUpdates();
-                           });
+                            });
     }
     else
     {
@@ -33881,7 +44316,12 @@ int main(int argc, char *argv[])
                                         ide->setCursor(Qt::ArrowCursor);
                                         if (selectedFile == "__NEW_FILE__")
                                         {
-                                            ide->newFile();
+                                            const int selectedType = welcomeDialog.getSelectedNewFileType();
+                                            if (selectedType >= static_cast<int>(NewFileDialog::NormalCpp) &&
+                                                selectedType <= static_cast<int>(NewFileDialog::MarkdownFile))
+                                            {
+                                                ide->createNewFile(static_cast<NewFileDialog::FileType>(selectedType));
+                                            }
                                         }
                                         else if (!selectedFile.isEmpty())
                                         {
@@ -33892,7 +44332,7 @@ int main(int argc, char *argv[])
                                                                 ide->autoCheckForUpdates();
                                                             });
                                     }
-                                     else
+                                    else
                                     {
                                         QApplication::quit();
                                     }
@@ -33930,16 +44370,21 @@ int main(int argc, char *argv[])
                     ide->setCursor(Qt::ArrowCursor);
                     if (selectedFile == "__NEW_FILE__")
                     {
-                        ide->newFile();
+                        const int selectedType = welcomeDialog.getSelectedNewFileType();
+                        if (selectedType >= static_cast<int>(NewFileDialog::NormalCpp) &&
+                            selectedType <= static_cast<int>(NewFileDialog::MarkdownFile))
+                        {
+                            ide->createNewFile(static_cast<NewFileDialog::FileType>(selectedType));
+                        }
                     }
                     else if (!selectedFile.isEmpty())
                     {
                         ide->loadFile(selectedFile);
                     }
                     QTimer::singleShot(500, ide, [ide]()
-                                       {
-                                           ide->autoCheckForUpdates();
-                                       });
+                                        {
+                                            ide->autoCheckForUpdates();
+                                        });
                 }
                 else
                 {
@@ -33967,5 +44412,3 @@ int main(int argc, char *argv[])
 }
 
 #include "main.moc"
-
-// 到此结束！如果你喜欢，一定要记得点个 Star 哦~
