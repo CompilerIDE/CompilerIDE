@@ -18,8 +18,8 @@ find_package(Qt6 REQUIRED COMPONENTS
     QuickLayouts
 )
 
-set(SOURCES main.cpp mainwindow.cpp)
-set(HEADERS mainwindow.h)
+set(SOURCES main.cpp MarkdownEditor.cpp)
+set(HEADERS MarkdownEditor.h)
 set(FORMS mainwindow.ui)
 set(RESOURCES resources.qrc)
 
